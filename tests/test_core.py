@@ -103,3 +103,24 @@ def test_auto_scan_account_layouts(cache, tmp_path, monkeypatch, relative):
     monkeypatch.setattr(core.sys, 'platform', 'darwin')
     monkeypatch.setattr(core, 'default_root', lambda: root)
     assert len(core.scan(core.auto_root())) == 3
+
+
+def test_cached_bytes_exclude_index_ranges_past_eof(cache):
+    path = cache/'telegram-cloud-document-1-1001_partial'
+    length = path.stat().st_size
+    write_map(path, length + 10000, [(0, 1000), (length+5000, 1000)])
+    row = core.inspect(path)
+    assert row.status == 'partial' and row.cached_size == 1000
+
+
+@pytest.mark.parametrize('stream_duration,format_duration,expected', [
+    ('12.5', '20', 12.5), ('N/A', '20', 20), ('NaN', 'Infinity', None), ('0', '-1', None)])
+def test_duration_comes_from_media_metadata(tmp_path, monkeypatch, stream_duration, format_duration, expected):
+    import json
+    path = tmp_path/'misleading-9999-seconds.mp4'
+    path.write_bytes(b'0000ftyp'+bytes(20))
+    monkeypatch.setattr(core, 'run', lambda *a, **kw: (json.dumps({
+        'streams': [{'codec_type': 'video', 'codec_name': 'h264', 'duration': stream_duration}],
+        'format': {'duration': format_duration}}), ''))
+    row = core.inspect(path)
+    assert row.duration == expected and row.status == 'unknown'

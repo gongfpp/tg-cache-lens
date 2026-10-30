@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 import json
+import math
 import os
 import re
 import shutil
@@ -96,7 +97,7 @@ def signature(path):
         pass
     return None
 
-def read_map(data):
+def read_map(data, file_size=None):
     # Independently implemented from the public MediaBoxFileMap format.
     if len(data) < 20 or struct.unpack_from("<I", data)[0] != 0x7bac1487:
         raise ValueError("不支持的缓存索引格式")
@@ -110,7 +111,8 @@ def read_map(data):
     for start, length in sorted(struct.unpack_from("<qq", payload, 8+16*i) for i in range(count)):
         if start < 0 or length < 0: raise ValueError("缓存索引范围错误")
         gap |= start > end
-        cached += max(0, start+length-max(start, end))
+        available_end = start+length if file_size is None else min(start+length, file_size)
+        cached += max(0, available_end-max(start, end))
         end = max(end, start+length)
     gap |= total >= 0 and end < total
     return (total if total >= 0 else None), cached, gap, end
@@ -130,7 +132,7 @@ def inspect(path, kind=None, deep=False, timeout=600):
     verified_map = False
     if before[4] is not None:
         try:
-            item.total, item.cached, gap, end = read_map(before[4])
+            item.total, item.cached, gap, end = read_map(before[4], item.size)
         except ValueError as e:
             item.status, item.detail = "invalid", str(e)
             return item
@@ -140,7 +142,7 @@ def inspect(path, kind=None, deep=False, timeout=600):
             verified_map = item.total is not None and item.total > 0
     try:
         raw, _ = run([binary("ffprobe"), "-v", "error", "-show_entries",
-            "format=duration:stream=codec_type,codec_name,width,height:stream_disposition=attached_pic", "-of", "json", str(path)], 15)
+            "format=duration:stream=codec_type,codec_name,width,height,duration:stream_disposition=attached_pic", "-of", "json", str(path)], 15)
         info = json.loads(raw)
         streams = info.get("streams", [])
         videos = [s for s in streams if s.get("codec_type") == "video" and not s.get("disposition", {}).get("attached_pic")]
@@ -148,8 +150,12 @@ def inspect(path, kind=None, deep=False, timeout=600):
         v = videos[0]
         item.width, item.height, item.codec = v.get("width", 0), v.get("height", 0), v.get("codec_name", "")
         item.audio = next((s.get("codec_name", "") for s in streams if s.get("codec_type") == "audio"), "")
-        duration = info.get("format", {}).get("duration")
-        item.duration = float(duration) if duration else None
+        for value in (v.get('duration'), info.get('format', {}).get('duration')):
+            try: duration = float(value)
+            except (ValueError, TypeError): continue
+            if math.isfinite(duration) and duration > 0:
+                item.duration = duration
+                break
         if item.status != "partial":
             if deep:
                 _, errors = run([binary("ffmpeg"), "-nostdin", "-v", "error", "-xerror", "-err_detect", "explode",

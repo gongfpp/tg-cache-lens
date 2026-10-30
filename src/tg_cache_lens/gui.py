@@ -135,7 +135,7 @@ class Window(QMainWindow):
         self.timeout = timeout
         self.rows = []; self.widgets = {}; self.images = {}; self.jobs = []; self.thumb_attempted = set()
         self.active_job = None; self.thumb_job = None; self.busy = False; self.closing = False
-        self.current = None; self.preview_path = None; self.last_results = None
+        self.current = None; self.preview_path = None; self.pending_preview = None; self.last_results = None
         self.temp = tempfile.TemporaryDirectory(prefix='cache-lens-gui-')
         self.setWindowTitle('Cache Lens')
         self.resize(1120, 760)
@@ -149,8 +149,8 @@ class Window(QMainWindow):
         logo = QLabel(); logo.setPixmap(QIcon(str(icon_path)).pixmap(28, 28))
         toolbar.addWidget(logo); toolbar.addWidget(title); toolbar.addStretch()
         self.scan_button = QPushButton('自动扫描缓存'); self.scan_button.clicked.connect(self.auto_scan)
-        self.cache_button = QPushButton('手动选择…'); self.cache_button.clicked.connect(self.choose_cache)
-        toolbar.addWidget(self.scan_button); toolbar.addWidget(self.cache_button); layout.addLayout(toolbar)
+        self.cache_button = QPushButton('选择缓存目录…'); self.cache_button.clicked.connect(self.choose_cache)
+        toolbar.addWidget(self.cache_button); toolbar.addWidget(self.scan_button); layout.addLayout(toolbar)
         tools = QHBoxLayout()
         self.filter_buttons = []
         for label in ('全部', '可验证导出', '数据不全', '其他'):
@@ -180,15 +180,28 @@ class Window(QMainWindow):
             field.setMinimumWidth(110)
         filters.addWidget(self.min_size); filters.addWidget(QLabel('—')); filters.addWidget(self.max_size)
         filters.addStretch()
-        self.thumbnails_button = QPushButton('缩略图'); self.thumbnails_button.setCheckable(True)
-        self.thumbnails_button.toggled.connect(self.toggle_thumbnails); filters.addWidget(self.thumbnails_button)
-        self.preview_button = QPushButton('预览'); self.preview_button.setCheckable(True)
-        self.preview_button.toggled.connect(self.toggle_preview); filters.addWidget(self.preview_button)
         layout.addLayout(filters)
+        timing = QHBoxLayout(); timing.addWidget(QLabel('时长'))
+        self.min_duration = QDoubleSpinBox(); self.max_duration = QDoubleSpinBox()
+        for field, name in ((self.min_duration, '最小时长'), (self.max_duration, '最大时长')):
+            field.setRange(0, 604800); field.setDecimals(2); field.setSuffix(' 秒')
+            field.setSpecialValueText('不限'); field.setAccessibleName(name)
+            field.setToolTip('读取媒体中的时长；缺片文件的时长不代表缓存可完整播放的时长')
+            field.setKeyboardTracking(False); field.valueChanged.connect(self.apply_filter)
+            field.setMinimumWidth(110)
+        timing.addWidget(self.min_duration); timing.addWidget(QLabel('—')); timing.addWidget(self.max_duration)
+        timing.addStretch()
+        self.thumbnails_button = QPushButton('显示缩略图'); self.thumbnails_button.setCheckable(True)
+        self.thumbnails_button.toggled.connect(self.toggle_thumbnails); timing.addWidget(self.thumbnails_button)
+        self.preview_button = QPushButton('关闭预览'); self.preview_button.setCheckable(True)
+        self.preview_button.toggled.connect(self.toggle_preview); self.preview_button.hide(); timing.addWidget(self.preview_button)
+        layout.addLayout(timing)
         splitter = self.splitter = QSplitter(); layout.addWidget(splitter, 1)
         left = QWidget(); left_layout = QVBoxLayout(left); left_layout.setContentsMargins(0,0,0,0)
         self.list = QListWidget(); self.list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.list.currentItemChanged.connect(self.select)
+        self.list.itemClicked.connect(self.open_preview)
+        self.list.itemActivated.connect(self.open_preview)
         left_layout.addWidget(self.list)
         self.selection = QLabel('已选 0 项'); self.selection.setObjectName('muted'); left_layout.addWidget(self.selection)
         splitter.addWidget(left)
@@ -249,12 +262,22 @@ class Window(QMainWindow):
 
     def toggle_preview(self, visible):
         self.preview_panel.setVisible(visible)
+        self.preview_button.setVisible(visible)
         if visible:
             self.splitter.setSizes([510, 570])
-            self.toggle_play()
+            if self.current and self.current.status in ELIGIBLE:
+                if self.busy: self.pending_preview = self.current.path
+                else: self.toggle_play()
         else:
+            self.pending_preview = None
             self.clear_preview()
             self.stack.setCurrentWidget(self.poster)
+        self.update_actions()
+
+    def open_preview(self, item):
+        if item.isHidden(): return
+        if self.current is not item.data(Qt.ItemDataRole.UserRole): self.select(item)
+        self.preview_button.setChecked(True)
 
     def clear_preview(self):
         self.player.stop(); self.player.setSource(QUrl())
@@ -262,6 +285,7 @@ class Window(QMainWindow):
         self.preview_path = None
 
     def toggle_thumbnails(self, visible):
+        self.thumbnails_button.setText('隐藏缩略图' if visible else '显示缩略图')
         for widget in self.widgets.values(): widget.thumb.setVisible(visible)
         if visible: self.start_thumbnails()
         elif self.thumb_job:
@@ -310,15 +334,22 @@ class Window(QMainWindow):
             lower, upper = self.min_size.value()*1024**2, self.max_size.value()*1024**2
             size_match = (lower == 0 and upper == 0) or (row.cached_size is not None
                 and row.cached_size >= lower and (upper == 0 or row.cached_size <= upper))
-            item.setHidden(not (match and type_match and size_match) or query not in row.path.name.lower())
+            shortest, longest = self.min_duration.value(), self.max_duration.value()
+            time_match = (shortest == 0 and longest == 0) or (row.duration is not None
+                and row.duration >= shortest and (longest == 0 or row.duration <= longest))
+            item.setHidden(not (match and type_match and size_match and time_match) or query not in row.path.name.lower())
         if self.list.currentItem() and self.list.currentItem().isHidden(): self.list.setCurrentItem(None)
-        if self.min_size.value() and self.max_size.value() and self.min_size.value() > self.max_size.value():
-            self.status.setText('最小值不能大于最大值')
-        elif self.rows and not self.busy:
-            visible = sum(not self.list.item(n).isHidden() for n in range(self.list.count()))
-            self.status.setText(f'{visible} / {len(self.rows)} 项')
+        if not self.busy: self.filter_summary()
         self.start_thumbnails()
         self.update_actions()
+
+    def filter_summary(self):
+        for name, lower, upper in (('大小', self.min_size, self.max_size), ('时长', self.min_duration, self.max_duration)):
+            if upper.value() and lower.value() > upper.value():
+                self.status.setText(f'{name}最小值不能大于最大值')
+                return
+        visible = sum(not self.list.item(n).isHidden() for n in range(self.list.count()))
+        self.status.setText(f'{visible} / {len(self.rows)} 项' if self.rows else '未找到可识别的视频')
 
     def sort_rows(self):
         selected = set(str(r.path) for r in self.checked_rows())
@@ -336,9 +367,6 @@ class Window(QMainWindow):
             widget.check.setChecked(str(row.path) in checked)
             if str(row.path) in self.images: widget.picture(self.images[str(row.path)])
         self.apply_filter()
-        for n in range(self.list.count()):
-            if not self.list.item(n).isHidden():
-                self.list.setCurrentRow(n); break
 
     def selected_count(self): return len(self.checked_rows())
 
@@ -418,7 +446,11 @@ class Window(QMainWindow):
             self.state.setText(core.LABELS[self.current.status])
             self.update_details()
         if self.closing: self.close()
-        else: self.start_thumbnails()
+        else:
+            if self.pending_preview is not None:
+                pending, self.pending_preview = self.pending_preview, None
+                if self.current and self.current.path == pending and self.preview_button.isChecked(): self.toggle_play()
+            self.start_thumbnails()
 
     def on_progress(self, n, total, text):
         self.scan_has_progress = True
@@ -431,6 +463,7 @@ class Window(QMainWindow):
     def scan(self, automatic=False):
         if self.busy: return
         self.preview_button.setChecked(False)
+        self.thumbnails_button.setChecked(False)
         self.status.setText('正在定位并扫描…' if automatic else '正在扫描…')
         self.scan_has_progress = False
         if self.thumb_job:
@@ -457,8 +490,7 @@ class Window(QMainWindow):
         counts = [len(rows), sum(r.status in ELIGIBLE for r in rows), sum(r.status == 'partial' for r in rows), sum(r.status not in (*ELIGIBLE,'partial') for r in rows)]
         for button, name, count in zip(self.filter_buttons, ('全部','可验证导出','数据不全','其他'), counts): button.setText(f'{name} {count}')
         self.apply_filter()
-        visible = sum(not self.list.item(n).isHidden() for n in range(self.list.count()))
-        self.status.setText(f'{visible} / {len(rows)} 项' if rows else '未找到可识别的视频')
+        self.filter_summary()
 
     def thumbnail_finished(self):
         if self.closing: self.close()
