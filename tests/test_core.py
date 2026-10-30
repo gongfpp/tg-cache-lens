@@ -59,3 +59,47 @@ def test_decode_detects_damage(cache):
     b=p.read_bytes(); p.write_bytes(b[:len(b)//2])
     write_map(p,p.stat().st_size,[(0,p.stat().st_size)])
     assert core.inspect(p,deep=True).status=='invalid'
+
+
+def test_auto_location_and_image_exclusion(tmp_path, monkeypatch):
+    monkeypatch.setattr(core.sys, 'platform', 'darwin')
+    monkeypatch.setattr(core, 'default_root', lambda: tmp_path)
+    with pytest.raises(RuntimeError, match='未找到'):
+        core.auto_root()
+    media = tmp_path/'appstore/account-example/postbox/media'
+    media.mkdir(parents=True)
+    assert core.auto_root() == tmp_path
+    (media/'icon').write_bytes(b'\x89PNG\r\n\x1a\n'+bytes(20))
+    (media/'animation').write_bytes(b'GIF89a'+bytes(20))
+    assert core.scan(tmp_path) == []
+    monkeypatch.setattr(core.sys, 'platform', 'win32')
+    with pytest.raises(RuntimeError, match='macOS'):
+        core.auto_root()
+
+
+def test_attached_cover_is_not_a_video(tmp_path, monkeypatch):
+    import json
+    path = tmp_path/'cover.mp4'
+    path.write_bytes(b'0000ftyp'+bytes(20))
+    monkeypatch.setattr(core, 'run', lambda *a, **kw: (json.dumps({'streams': [
+        {'codec_type': 'video', 'codec_name': 'mjpeg', 'disposition': {'attached_pic': 1}},
+        {'codec_type': 'audio', 'codec_name': 'aac'}]}), ''))
+    assert core.inspect(path) is None
+
+
+def test_unknown_cached_size_is_not_file_length(cache):
+    rows = core.scan(cache)
+    unknown = next(row for row in rows if row.status == 'unknown')
+    assert unknown.size > 0 and unknown.cached_size is None
+    partial = next(row for row in rows if row.status == 'partial')
+    assert partial.cached_size == 1100 < partial.size
+
+
+@pytest.mark.parametrize('relative', ['appstore/account-test/postbox/media', 'account-test/postbox/media'])
+def test_auto_scan_account_layouts(cache, tmp_path, monkeypatch, relative):
+    import shutil
+    root = tmp_path/'container'
+    shutil.copytree(cache, root/relative)
+    monkeypatch.setattr(core.sys, 'platform', 'darwin')
+    monkeypatch.setattr(core, 'default_root', lambda: root)
+    assert len(core.scan(core.auto_root())) == 3

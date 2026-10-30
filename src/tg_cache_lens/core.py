@@ -10,6 +10,7 @@ import re
 import shutil
 import struct
 import subprocess
+import sys
 import zlib
 
 LABELS = {"ready": "完整可导出", "covered": "数据齐全·待验证", "partial": "数据不全",
@@ -33,6 +34,16 @@ class Media:
     fingerprint: tuple = field(default_factory=tuple)
 
     @property
+    def cached_size(self):
+        # File length can include sparse/preallocated bytes, so it is not a fallback.
+        return min(self.size, self.cached) if self.cached is not None else None
+
+    @property
+    def suspected_animation(self):
+        return (not self.audio and self.duration is not None and 0 < self.duration <= 30
+                and 0 < self.width <= 512 and 0 < self.height <= 512)
+
+    @property
     def key(self):
         return re.sub(r"(_partial|\.(mp4|mkv|webm|mov))$", "", self.path.name)
 
@@ -42,6 +53,18 @@ class Media:
 
 def default_root():
     return Path.home() / "Library/Group Containers/6N38VWS5BX.ru.keepcoder.Telegram"
+
+def auto_root():
+    if sys.platform != "darwin":
+        raise RuntimeError("自动定位支持 macOS 原生 Telegram；其他来源请手动选择兼容的 MediaBox 目录")
+    root = default_root()
+    if not root.is_dir() or not media_dirs(root):
+        raise RuntimeError("未找到 Telegram 缓存目录，请先运行 Telegram，或手动选择目录")
+    return root
+
+def media_dirs(root):
+    return sorted(p for p in set(root.glob("*/account-*/postbox/media")) |
+                  set(root.glob("account-*/postbox/media")) if p.is_dir())
 
 def default_output():
     return Path.home() / "Downloads/Telegram Exports"
@@ -117,10 +140,10 @@ def inspect(path, kind=None, deep=False, timeout=600):
             verified_map = item.total is not None and item.total > 0
     try:
         raw, _ = run([binary("ffprobe"), "-v", "error", "-show_entries",
-            "format=duration:stream=codec_type,codec_name,width,height", "-of", "json", str(path)], 15)
+            "format=duration:stream=codec_type,codec_name,width,height:stream_disposition=attached_pic", "-of", "json", str(path)], 15)
         info = json.loads(raw)
         streams = info.get("streams", [])
-        videos = [s for s in streams if s.get("codec_type") == "video"]
+        videos = [s for s in streams if s.get("codec_type") == "video" and not s.get("disposition", {}).get("attached_pic")]
         if not videos: return None
         v = videos[0]
         item.width, item.height, item.codec = v.get("width", 0), v.get("height", 0), v.get("codec_name", "")
@@ -148,7 +171,7 @@ def scan(root, deep=False, progress=lambda *a: None, timeout=600):
     root = Path(root).expanduser()
     if not root.is_dir(): raise RuntimeError("缓存目录不存在；请用 --cache 指定 media 文件夹")
     binary("ffmpeg"); binary("ffprobe")
-    dirs = [root] if root.name == "media" else sorted(root.glob("*/account-*/postbox/media"))
+    dirs = [root] if root.name == "media" else media_dirs(root)
     if not dirs:
         # Explicit flat fixture or custom cache directory.
         dirs = [root]
