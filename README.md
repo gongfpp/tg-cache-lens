@@ -16,7 +16,7 @@
 brew install ffmpeg
 ```
 
-**Apple Silicon Mac：** 从 [Releases](https://github.com/gongfpp/tg-cache-lens/releases/latest) 下载 `tg-cache-lens-0.2.0-macos-arm64.zip` 并解压：
+**Apple Silicon Mac：** 从 [Releases](https://github.com/gongfpp/tg-cache-lens/releases/latest) 下载 `tg-cache-lens-0.3.0-macos-arm64.zip` 并解压：
 
 - 双击 **Cache Lens.app** 打开独立窗口，可将它拖入“应用程序”。
 - 双击 **tg-cache-lens/Launch.command** 打开简洁命令行。
@@ -32,7 +32,7 @@ uv sync --frozen --extra gui
 uv run --extra gui tg-cache-lens gui
 ```
 
-只用命令行可省略 `--extra gui`。也可从 Release 安装 wheel：`pip install './tg_cache_lens-0.2.0-py3-none-any.whl[gui]'`；省略 `[gui]` 则不安装窗口依赖。
+只用命令行可省略 `--extra gui`。也可从 Release 安装 wheel：`pip install './tg_cache_lens-0.3.0-py3-none-any.whl[gui]'`；省略 `[gui]` 则不安装窗口依赖。
 
 默认自动查找当前用户的 Telegram Group Container，导出到 `~/Downloads/Telegram Exports`。可在 GUI 选择目录，或用参数指定：
 
@@ -42,7 +42,7 @@ tg-cache-lens --cache '/path/to/postbox/media' --output './exports'
 
 ## Mac 窗口
 
-以下为当前源码的按需浏览体验，已发布的 v0.2.0 安装包仍使用自动扫描界面。
+v0.3.0 支持以下按需浏览体验。
 
 1. 启动后不扫描。点击“选择缓存目录…”指定兼容的 MediaBox 目录，或点击旁边的“自动扫描缓存”按系统定位缓存并扫描。目前自动定位支持 macOS 原生 Telegram；Windows／Linux 的 Telegram Desktop `tdata` 不属于支持的缓存格式。macOS 首次读取目录时可能询问是否允许“访问其他应用的数据”。
 2. 每次扫描后只显示文字列表，支持名称搜索、完整性筛选、大小／时长排序，以及已缓存大小和时长的上下限筛选。时长以秒输入，0 表示不限。默认排除疑似动图／贴纸；可以切换到“疑似动图 / 贴纸”或“全部类型”。
@@ -111,7 +111,7 @@ uv run --extra gui pytest -q
 # 生成公开测试视频，用真实应用打开后截图
 uv run python scripts/capture_demo.py
 uv run --extra gui tg-cache-lens gui --cache .local/demo/media --output .local/demo-export
-# 构建 Apple Silicon 安装包内容
+# 构建 Apple Silicon 安装包内容，应用输出到 build/Cache Lens.app
 ./scripts/build_macos.sh
 ```
 

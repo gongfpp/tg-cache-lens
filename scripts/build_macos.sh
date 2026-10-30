@@ -1,11 +1,12 @@
 #!/bin/sh
 set -eu
 cd "$(dirname "$0")/.."
-DIST_DIR="${DIST_DIR:-dist}"
+DIST_DIR="${DIST_DIR:-build}"
+WORK_DIR="${WORK_DIR:-.local/pyinstaller}"
 uv sync --frozen --extra gui
 uv run --extra gui python scripts/make_icon.py
-uv run --extra gui pyinstaller --distpath "$DIST_DIR" --noconfirm --clean --onedir --name tg-cache-lens --exclude-module PySide6 scripts/entry.py
-uv run --extra gui pyinstaller --distpath "$DIST_DIR" --noconfirm --clean --windowed --onedir --name 'Cache Lens' --osx-bundle-identifier io.github.gongfpp.tg-cache-lens --icon assets/icon.icns --collect-data tg_cache_lens scripts/gui_entry.py
+uv run --extra gui pyinstaller --workpath "$WORK_DIR" --distpath "$DIST_DIR" --noconfirm --clean --onedir --name tg-cache-lens --exclude-module PySide6 scripts/entry.py
+uv run --extra gui pyinstaller --workpath "$WORK_DIR" --distpath "$DIST_DIR" --noconfirm --clean --windowed --onedir --name 'Cache Lens' --osx-bundle-identifier io.github.gongfpp.tg-cache-lens --icon assets/icon.icns --collect-data tg_cache_lens scripts/gui_entry.py
 for target in "$DIST_DIR/tg-cache-lens" "$DIST_DIR/Cache Lens.app/Contents/Resources"; do
   cp LICENSE README.md "$target/"
   cp -R docs "$target/"
