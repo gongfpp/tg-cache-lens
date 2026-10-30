@@ -11,5 +11,5 @@ jobs:
         with:
           version: '0.9.7'
       - run: brew install ffmpeg
-      - run: uv sync --frozen --python 3.12
-      - run: uv run pytest -q
+      - run: uv sync --frozen --extra gui --python 3.12
+      - run: uv run --extra gui pytest -q

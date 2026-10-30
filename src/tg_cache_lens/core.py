@@ -215,6 +215,8 @@ def export(item, output, fmt="mp4", timeout=600):
         if stamp(fresh.path) != fresh.fingerprint: raise RuntimeError("导出期间缓存发生变化，请重新扫描")
         # Hard link is atomic and refuses to overwrite an existing destination.
         os.link(temp, target)
+        item.status, item.detail = fresh.status, fresh.detail
+        item.fingerprint = fresh.fingerprint
         return target
     finally:
         temp.unlink(missing_ok=True)

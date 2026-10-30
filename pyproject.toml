@@ -4,15 +4,20 @@ build-backend = "hatchling.build"
 
 [project]
 name = "tg-cache-lens"
-version = "0.1.0"
-description = "Inspect, preview and export Telegram macOS video caches from your terminal."
+version = "0.2.0"
+description = "Inspect, preview and export Telegram macOS video caches with a simple CLI and a standalone Mac window."
 requires-python = ">=3.10"
 license = "MIT"
 readme = "README.md"
-dependencies = ["textual>=6.0,<7"]
+dependencies = []
 
 [project.scripts]
 tg-cache-lens = "tg_cache_lens.__main__:main"
+
+[project.optional-dependencies]
+gui = [
+    "pyside6>=6.8,<7",
+]
 
 [dependency-groups]
 dev = ["pytest>=8", "pytest-asyncio>=1", "pyinstaller>=6", "pillow>=11"]

@@ -1,55 +1,90 @@
 <p align="center"><img src="assets/icon.svg" width="88" alt="TG Cache Lens：带播放符号的放大镜" /></p>
 <h1 align="center">TG Cache Lens</h1>
-<p align="center">在终端里检查 Telegram 视频缓存，预览并导出完整视频。</p>
+<p align="center">检查 Telegram 本地视频缓存，用简洁命令行或独立 Mac 窗口预览、导出完整视频。</p>
 
-![真实 TUI 运行截图：列表区分完整、缺片和未知状态，右侧提供预览与导出](assets/tui.png)
+![实际 Mac 窗口：缩略图列表、内嵌播放器、勾选和批量导出](assets/gui.png)
 
-支持 **macOS 原生 Telegram 的 MediaBox 缓存**。读取 `.meta` 中的字节范围，结合 FFmpeg 全程解码，区分完整视频与缺片文件。全程本地处理，无须登录、不连接 Telegram 服务、不修改缓存。不是下载器，不能补回本地不存在的数据。Qt 版 Telegram Desktop 的 `tdata` 缓存不在当前支持范围内。
+支持 **macOS 原生 Telegram 的 MediaBox 缓存**。读取 `.meta` 的字节范围，结合 FFmpeg 全程解码，区分完整视频与缺片文件。全程本地处理，无须登录，不连接 Telegram 服务，不修改缓存。不能补回本地不存在的数据；Qt 版 Telegram Desktop 的 `tdata` 不在支持范围内。
 
-截图来自 macOS 终端内实际运行的 TUI，仅裁去含用户名的系统标题栏；使用 FFmpeg 生成的测试素材，不含私人聊天或缓存内容。
+截图来自真实运行的应用，使用 FFmpeg 生成的测试画面，不含私人聊天或缓存内容。
 
 ## 开始使用
 
-需要 **FFmpeg**；源码安装另需 Python 3.10+。
+先安装媒体工具：
 
 ```sh
 brew install ffmpeg
 ```
 
-**Apple Silicon Mac：** 从 [Releases](https://github.com/gongfpp/tg-cache-lens/releases/latest) 下载 `tg-cache-lens-*-macos-arm64.zip`，解压后双击 `Launch.command`，或在终端运行其中的 `tg-cache-lens`。此包包含 Python 运行时，不包含 FFmpeg，也未做 Apple 签名或公证。
+**Apple Silicon Mac：** 从 [Releases](https://github.com/gongfpp/tg-cache-lens/releases/latest) 下载 `tg-cache-lens-0.2.0-macos-arm64.zip` 并解压：
 
-**从源码安装：**
+- 双击 **Cache Lens.app** 打开独立窗口，可将它拖入“应用程序”。
+- 双击 **tg-cache-lens/Launch.command** 打开简洁命令行。
+
+安装包包含 Python 与 GUI 运行时，外部 `ffmpeg`、`ffprobe` 仍需上面的一步安装。应用未做 Apple 开发者签名或公证；首次打开可能需要在 macOS“隐私与安全性”中允许打开。
+
+**从源码运行（Python 3.10+）：**
 
 ```sh
 git clone https://github.com/gongfpp/tg-cache-lens.git
 cd tg-cache-lens
-uv sync --frozen --no-dev
-uv run tg-cache-lens
+uv sync --frozen --extra gui
+uv run --extra gui tg-cache-lens gui
 ```
 
-也可以从 Release 下载 wheel 后运行 `pip install ./tg_cache_lens-*.whl`。
+只用命令行可省略 `--extra gui`。也可从 Release 安装 wheel：`pip install './tg_cache_lens-0.2.0-py3-none-any.whl[gui]'`；省略 `[gui]` 则不安装窗口依赖。
 
-默认自动查找当前用户的 Telegram Group Container，并将导出文件写入 `~/Downloads/Telegram Exports`。其他目录可以指定：
+默认自动查找当前用户的 Telegram Group Container，导出到 `~/Downloads/Telegram Exports`。可在 GUI 选择目录，或用参数指定：
 
 ```sh
 tg-cache-lens --cache '/path/to/postbox/media' --output './exports'
 ```
 
-## 使用
+## Mac 窗口
 
-- **F5 / 扫描**：快速读取索引和媒体信息。右上角筛选状态，`/` 搜索文件名。
-- **F6 / 验证**：对没有已知缺口的候选文件进行全程解码。扫描期间显示当前进度，界面仍可响应。
-- **点击列表或方向键选择**：右侧显示编码、尺寸、时长、覆盖率与验证依据。
-- **P / 预览**：验证完整性，生成临时 MP4，用系统默认播放器打开。预览文件在退出 TUI 时清理。
-- **E / 导出当前**：选择 MP4、MKV 或原格式，再导出当前视频。
-- **A / 导出全部完整**：处理所有完整或待验证项，逐个复验，通过后才写入输出目录。此操作不受列表筛选影响。
-- **Q**：退出。窄终端自动切换为上下布局，建议至少 85 列 × 36 行。
+1. 启动后自动扫描。macOS 首次读取 Telegram 目录时可能询问是否允许“访问其他应用的数据”，确认后才开始读取；拒绝后可选择有权限的缓存目录。左侧显示缩略图、时长、大小和状态，上方可以搜索、筛选和排序。
+2. 点击一行查看画面，点击“播放”后自动验证完整性，在窗口内播放；支持暂停、拖动进度和静音。技术信息收在“文件详情”。
+3. 点击“导出此视频”，或勾选多行后点击“导出所选”。旁边的箭头菜单可以“导出全部完整视频”、选择当前列表的可导出项、取消勾选。
+4. 底部选择导出目录和 MP4、MKV 或原格式。完成后显示成功／失败数量，“打开文件夹”查看结果，有失败时可展开原因。
 
-MP4 优先无损重新封装；不适合 MP4 的编码会转为 H.264/AAC。MKV 无损封装，原格式保留源文件字节。已有输出不会覆盖，同名文件自动增加编号。批量失败会显示数量，并写入输出目录的 `export-errors.txt`。
+“可验证导出”包含索引覆盖完整长度的候选文件，**实际导出前仍需全程解码通过**。数据不全、未知长度和无法验证的文件不能勾选或导出。缩略图只表示读到了某一帧，不证明完整性。
 
-![实际点击导出后的 TUI：显示成功数量及输出目录](assets/export.png)
+搜索和筛选不会清除勾选；“导出所选”包含隐藏的已选项，“导出全部完整视频”处理整个扫描结果。扫描、预览准备和导出在后台进行；任务未结束时关闭窗口，会等待当前处理完成再清理临时文件。
 
-## 如何理解检测结果
+## 简洁命令行
+
+直接运行 `tg-cache-lens`，自动扫描后显示摘要和每页 10 项的简表。输入编号，再选择预览或导出；不使用全屏界面，也无需调整终端尺寸。
+
+![实际终端中的简洁命令行：扫描摘要、编号、分页和操作选择](assets/cli.png)
+
+| 输入 | 操作 |
+|---|---|
+| 数字 | 查看该项，然后 `p` 预览、`e` 导出、回车返回 |
+| `n` / `b` | 下一页 / 上一页 |
+| `/关键词` / `/` | 搜索文件名 / 清除搜索 |
+| `a` | 验证并导出全部完整视频 |
+| `r` / `g` / `q` | 重新扫描 / 打开 GUI / 退出 |
+
+命令行预览使用系统默认播放器，临时预览文件在退出时清理；GUI 使用内嵌播放器。默认导出 MP4，可用 `--format mkv` 或 `--format original` 更改。
+
+**无需交互的命令**：
+
+```sh
+# 与 v0.1 的 JSON 扫描接口兼容
+tg-cache-lens --scan --deep > report.json
+# 批量验证并导出
+tg-cache-lens export --all-complete
+# 单个缓存；完整性不通过时返回非零退出码
+tg-cache-lens export --file '/path/to/cache-file' --format mp4 --output './exports'
+# 打开图形界面
+tg-cache-lens gui
+# 较长视频增加每次解码和导出的超时，单位为秒
+tg-cache-lens --timeout 1800
+```
+
+JSON 包含本机路径。批量导出向终端列出失败原因，有失败时返回非零退出码。
+
+## 检测与导出规则
 
 | 状态 | 依据 | 允许导出 |
 |---|---|---|
@@ -59,31 +94,26 @@ MP4 优先无损重新封装；不适合 MP4 的编码会转为 H.264/AAC。MKV 
 | 完整性未知 | 缺少完整长度依据；即使可解码，也不能排除截断 | 否 |
 | 无法验证 | 索引损坏、解码失败、超时或扫描期间文件变化 | 否 |
 
-同一资源的多份缓存会合并显示。文件大小可能包含空洞或预分配区域，**不等于实际下载量**。无可识别文件头的缓存不在视频列表中；WebM 视频贴纸可能被纳入。视频时长也不能单独证明完整性。
+同一资源的多份缓存会合并显示。文件大小可能包含空洞或预分配区域，**不等于实际下载量**。无可识别文件头的缓存不在列表中；视频贴纸可能被纳入。时长和解码通过不能单独证明完整性。
 
-非交互扫描仍然可用；JSON 中会包含本机文件路径，请自行决定分享范围：
-
-```sh
-tg-cache-lens --scan --deep > report.json
-# 较长视频可以增加单次解码/导出的超时，单位为秒
-tg-cache-lens --timeout 1800
-```
+MP4 优先无损重新封装；编码不适合 MP4 时转为 H.264/AAC。MKV 无损封装，原格式保留字节。输出会再次解码检查；缓存发生变化则中止；已有文件不会覆盖，同名自动增加编号。
 
 ## 开发与验证
 
 ```sh
-uv sync --frozen
-uv run pytest -q
-# 生成测试素材，运行真实界面并捕获截图（不读取私人缓存）
-env -u NO_COLOR TERM=xterm-256color uv run python scripts/capture_demo.py
-# 本机打包
+uv sync --frozen --extra gui
+uv run --extra gui pytest -q
+# 生成公开测试视频，用真实应用打开后截图
+uv run python scripts/capture_demo.py
+uv run --extra gui tg-cache-lens gui --cache .local/demo/media --output .local/demo-export
+# 构建 Apple Silicon 安装包内容
 ./scripts/build_macos.sh
 ```
 
-测试覆盖：完整/缺片/未知长度、损坏索引与视频、重复缓存合并、导出前复验、防覆盖、MP4/MKV/原格式、WebM→MP4，以及 TUI 点击、筛选、单项和批量导出。自动测试中的系统播放器启动被替换；播放器打开流程另在 macOS 上手动实测。
+测试覆盖完整性判断、损坏索引、重复缓存合并、导出前复验、防覆盖、MP4/MKV/原格式、WebM 转 MP4、命令行菜单与非交互导出，以及 GUI 的筛选、多选、播放帧、进度与失败提示。真实 Mac 窗口和私有缓存的实测边界记录在 [验证记录](docs/verification.md)。
 
-## 参考与许可
+## 许可
 
-交互参考 [Lazygit](https://github.com/jesseduffield/lazygit) 的列表、详情和快捷键组织方式，基于 [Textual](https://github.com/Textualize/textual) 实现，未复制参考项目界面资源。索引解析依据 Telegram 的公开 [MediaBoxFileMap.swift 格式](https://github.com/TelegramMessenger/Telegram-iOS/blob/master/submodules/Postbox/Sources/MediaBoxFileMap.swift) 独立实现。
+项目代码与自制图标使用 [MIT License](LICENSE)。索引解析依据 Telegram 公开的 [MediaBoxFileMap.swift 格式](https://github.com/TelegramMessenger/Telegram-iOS/blob/master/submodules/Postbox/Sources/MediaBoxFileMap.swift) 独立实现。测试画面由 FFmpeg 的测试信号生成。
 
-项目代码与自制图标使用 [MIT License](LICENSE)。截图素材通过 FFmpeg 的测试信号生成。FFmpeg 作为外部依赖安装，其许可证取决于用户安装的构建；Release 不捆绑 FFmpeg。二进制分发附带所含 Python 依赖的许可证。
+GUI 使用动态链接的 Qt / PySide6，按 LGPLv3 分发，安装包附带依赖声明、许可证及上游源码位置。Qt 播放后端包含其 LGPL FFmpeg 库；扫描和导出调用的 `ffmpeg` / `ffprobe` 命令行工具不随包分发。构建脚本会收集 [Qt 官方许可说明](https://doc.qt.io/qtforpython-6/licenses.html) 和第三方声明；可替换／重编译依赖后重新签名运行。
