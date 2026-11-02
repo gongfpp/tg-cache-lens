@@ -2,7 +2,9 @@
 <h1 align="center">TG Cache Lens</h1>
 <p align="center">检查 Telegram 本地视频缓存，用简洁命令行或独立 Mac 窗口预览、导出完整视频。</p>
 
-![v0.2.0 实际 Mac 窗口；当前源码新增按需浏览与大小、时长筛选](assets/gui.png)
+![Cache Lens 深色检视台：点击条目后展开播放器](assets/inspector.png)
+
+![缺片恢复视图：分析缓存范围并导出已验证片段](assets/recovery.png)
 
 支持 **macOS 原生 Telegram 的 MediaBox 缓存**。读取 `.meta` 的字节范围，结合 FFmpeg 全程解码，区分完整视频与缺片文件。全程本地处理，无须登录，不连接 Telegram 服务，不修改缓存。不能补回本地不存在的数据；Qt 版 Telegram Desktop 的 `tdata` 不在支持范围内。
 
@@ -16,7 +18,7 @@
 brew install ffmpeg
 ```
 
-**Apple Silicon Mac：** 从 [Releases](https://github.com/gongfpp/tg-cache-lens/releases/latest) 下载 `tg-cache-lens-0.3.0-macos-arm64.zip` 并解压：
+**Apple Silicon Mac：** 从 [Releases](https://github.com/gongfpp/tg-cache-lens/releases/latest) 下载 `tg-cache-lens-0.4.0-macos-arm64.zip` 并解压：
 
 - 双击 **Cache Lens.app** 打开独立窗口，可将它拖入“应用程序”。
 - 双击 **tg-cache-lens/Launch.command** 打开简洁命令行。
@@ -32,7 +34,7 @@ uv sync --frozen --extra gui
 uv run --extra gui tg-cache-lens gui
 ```
 
-只用命令行可省略 `--extra gui`。也可从 Release 安装 wheel：`pip install './tg_cache_lens-0.3.0-py3-none-any.whl[gui]'`；省略 `[gui]` 则不安装窗口依赖。
+只用命令行可省略 `--extra gui`。也可从 Release 安装 wheel：`pip install './tg_cache_lens-0.4.0-py3-none-any.whl[gui]'`；省略 `[gui]` 则不安装窗口依赖。
 
 默认自动查找当前用户的 Telegram Group Container，导出到 `~/Downloads/Telegram Exports`。可在 GUI 选择目录，或用参数指定：
 
@@ -42,12 +44,12 @@ tg-cache-lens --cache '/path/to/postbox/media' --output './exports'
 
 ## Mac 窗口
 
-v0.3.0 支持以下按需浏览体验。
+v0.4.0 支持以下按需浏览和缺片恢复体验。
 
 1. 启动后不扫描。点击“选择缓存目录…”指定兼容的 MediaBox 目录，或点击旁边的“自动扫描缓存”按系统定位缓存并扫描。目前自动定位支持 macOS 原生 Telegram；Windows／Linux 的 Telegram Desktop `tdata` 不属于支持的缓存格式。macOS 首次读取目录时可能询问是否允许“访问其他应用的数据”。
 2. 每次扫描后只显示文字列表，支持名称搜索、完整性筛选、大小／时长排序，以及已缓存大小和时长的上下限筛选。时长以秒输入，0 表示不限。默认排除疑似动图／贴纸；可以切换到“疑似动图 / 贴纸”或“全部类型”。
-3. 点击“显示缩略图”才生成列表画面，再次点击“隐藏缩略图”收起。点击视频行才展开预览，完整性验证通过后播放；仅勾选导出复选框不会打开预览。预览支持暂停、拖动进度和静音，点击“关闭预览”收起。切换视频时停止上一段，重新扫描时同时关闭预览和缩略图。技术信息收在“文件详情”；缺片等无法播放的条目仅显示详情。
-4. 点击预览区的“导出此视频”，或直接勾选多行后点击“导出所选”。旁边的箭头菜单可以“导出全部完整视频”、选择当前列表的可导出项、取消勾选。
+3. 点击“显示缩略图”才生成列表画面，再次点击“隐藏缩略图”收起。点击视频行才展开预览，完整性验证通过后播放；仅勾选导出复选框不会打开预览。预览支持暂停、拖动进度、音量、静音和全屏。切换视频时停止上一段，重新扫描时同时关闭预览和缩略图。技术信息收在“文件详情”；点击缺片文件会自动进入恢复视图，显示缓存字节分布并分析已缓存区间。选择可播放的片段可预览或导出为单独的 MP4，文件名带原片时间范围。索引不足、关键帧缺失或无法解码时会显示无可恢复片段。
+4. 列表上方可全选或反选当前可导出项，清空会取消所有勾选。点击预览区的“导出此视频”，或直接勾选多行后点击“导出所选”。旁边的箭头菜单可以“导出全部完整视频”、选择当前列表的可导出项、取消勾选。
 5. 底部选择导出目录和 MP4、MKV 或原格式。完成后显示成功／失败数量，“打开文件夹”查看结果，有失败时点击“查看失败原因”，无需开启预览。
 
 疑似动图／贴纸按“无音轨、时长不超过 30 秒、宽高不超过 512”判断，可能包含普通短视频；切换“全部类型”可找回。静态图片、GIF 和仅含封面图的音频不列为视频。已缓存大小来自有效索引中落在现有文件范围内的字节，不计算空洞或文件末尾之外的索引范围；缺少索引时显示未知。时长从视频流读取，缺失时尝试容器时长，不根据文件名推测；缺片文件标注的时长不证明缓存可完整播放。设置大小或时长上下限后不包含对应值未知的项，清除范围可恢复。扫描仍会读取文件头、索引和媒体信息；缩略图按钮与点击预览控制画面生成和播放。

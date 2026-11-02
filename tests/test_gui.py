@@ -187,8 +187,7 @@ def test_dismiss_preview_while_preparing_discards_result(window, monkeypatch):
     click_row(window)
     try:
         wait_for(started.is_set)
-        assert window.preview_button.isEnabled()
-        click(window.preview_button)
+        window.search.setText("no matching video")
         assert window.preview_panel.isHidden()
     finally:
         release.set()
@@ -262,12 +261,10 @@ def test_rescan_resets_thumbnails_and_click_opens_partial_details(window):
     partial = next(n for n in range(window.list.count())
                    if window.list.item(n).data(Qt.ItemDataRole.UserRole).status == 'partial')
     click_row(window, partial)
-    assert not window.preview_panel.isHidden() and not window.play.isEnabled()
-    assert window.player.source().isEmpty() and not window.busy
-    click(window.preview_button)
-    assert window.preview_panel.isHidden()
-    click_row(window, partial)
-    assert not window.preview_panel.isHidden()
+    wait_for(lambda: not window.busy)
+    assert window.inspector.currentWidget() is window.recovery
+    assert window.player.source().isEmpty() and not window.recovery.save.isEnabled()
+    assert '没有找到' in window.recovery.notice.text()
 
 
 def test_checkbox_selection_does_not_open_preview(window):
@@ -318,6 +315,7 @@ def test_resized_video_stays_above_controls(window, width, height):
     from PySide6.QtMultimedia import QVideoFrame
     from PySide6.QtCore import QPoint
 
+    window.inspector.show()
     window.preview_panel.show()
     window.stack.setCurrentWidget(window.video)
     frame = QImage(width, height, QImage.Format.Format_RGB32)
@@ -332,3 +330,32 @@ def test_resized_video_stays_above_controls(window, width, height):
         for control in (window.play, window.seek, window.clock, window.mute):
             assert bottom < control.mapTo(window, QPoint(0, 0)).y()
             assert window.rect().contains(control.mapTo(window, control.rect().bottomRight()))
+
+
+def test_recovery_panel_exports_only_checked_clip(window, tmp_path):
+    from test_recovery import broken_movie
+    row = broken_movie(window.cache)
+    window.scanned([row])
+    window.media_filter.setCurrentIndex(2)
+    click_row(window)
+    wait_for(lambda: not window.busy)
+    assert len(window.recovery.clips) == 2
+    window.recovery.table.item(0,0).setCheckState(Qt.CheckState.Unchecked)
+    click(window.recovery.save)
+    wait_for(lambda: window.last_results is not None and not window.busy)
+    paths, errors = window.last_results
+    assert not errors and len(paths) == 1 and '4.000s' in paths[0].name
+    assert core.inspect(paths[0], deep=True).duration == 2
+    assert window.recovery.isEnabled() and not window.recovery.isHidden()
+
+
+def test_select_all_and_invert_preserve_hidden_checks(window):
+    from dataclasses import replace
+    row = next(r for r in core.scan(window.cache) if r.status == 'covered')
+    window.scanned([row,replace(row,path=row.path.with_name('second'))])
+    click(window.select_all)
+    assert len(window.checked_rows())==2
+    window.search.setText('second')
+    window.invert_visible()
+    assert [r.path for r in window.checked_rows()]==[row.path]
+    assert '含隐藏 1 项' in window.selection.text()

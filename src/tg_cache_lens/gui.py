@@ -1,5 +1,7 @@
 """Standalone Qt window; all media work runs away from the GUI thread."""
 from pathlib import Path
+from datetime import datetime
+import os
 import subprocess
 import sys
 import tempfile
@@ -11,8 +13,9 @@ from PySide6.QtMultimediaWidgets import QGraphicsVideoItem
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QLineEdit, QComboBox, QListWidget, QListWidgetItem, QCheckBox,
     QSplitter, QSlider, QToolButton, QMenu, QFileDialog, QProgressBar, QPlainTextEdit, QStackedWidget, QDoubleSpinBox, QMessageBox,
-    QGraphicsView, QGraphicsScene, QFrame, QSizePolicy)
-from . import core
+    QGraphicsView, QGraphicsScene, QFrame, QSizePolicy, QDialog)
+from . import core, recovery
+from .recovery_view import RecoveryView
 from .cli import duration, size, batch
 
 ELIGIBLE = ('ready', 'covered')
@@ -23,26 +26,25 @@ def cached_label(row):
 
 
 STYLE = '''
-QWidget { color: #202b30; font-size: 13px; }
-QMainWindow, QWidget#surface { background: #fafbfc; }
-QPushButton, QToolButton, QComboBox, QLineEdit { border: 1px solid #d4dade; border-radius: 6px; padding: 8px 12px; background: #fff; }
-QPushButton:hover, QToolButton:hover { background: #eff7f6; }
-QPushButton:disabled, QToolButton:disabled { color: #9ca7aa; background: #f2f4f5; }
-QPushButton:checked, QToolButton#primary { background: #0c8579; color: white; border-color: #0c8579; }
-QToolButton#primary:disabled { background: #b4c6c3; border-color: #b4c6c3; }
-QListWidget { background: #fff; border: 1px solid #e0e5e7; border-radius: 6px; outline: 0; }
-QListWidget::item { border-bottom: 1px solid #edf0f1; }
-QListWidget::item:selected { background: #e0f2ef; }
-QLabel#muted { color: #66757d; }
-QLabel#title { font-size: 18px; font-weight: 600; }
-QLabel#poster { background: #e9edef; border-radius: 6px; color: #66757d; }
-QCheckBox::indicator { width: 17px; height: 17px; }
-QProgressBar { border: none; background: #e3ebe9; max-height: 4px; }
-QProgressBar::chunk { background: #0c8579; }
-QPlainTextEdit { border: 1px solid #d4dade; border-radius: 6px; background: #f6f8f9; }
-QSlider::groove:horizontal { height: 4px; background: #d9e3e1; border-radius: 2px; }
-QSlider::sub-page:horizontal { background: #0c8579; }
-QSlider::handle:horizontal { background: #fff; border: 1px solid #8daba6; width: 12px; margin: -5px 0; border-radius: 6px; }
+QWidget { color:#ecedf0; font-size:13px; }
+QMainWindow, QWidget#surface, QDialog { background:#202227; }
+QPushButton,QToolButton,QLineEdit,QComboBox,QDoubleSpinBox { background:#30333a; border:1px solid #494d57; border-radius:5px; padding:5px 8px; }
+QPushButton:hover,QToolButton:hover { background:#404651; }
+QPushButton:checked,QPushButton#primary,QToolButton#primary { background:#326dd5; color:white; }
+QPushButton:disabled,QToolButton:disabled { color:#838996; background:#2b2e33; }
+QListWidget,QTableWidget,QPlainTextEdit,QComboBox QAbstractItemView,QMenu { background:#24272d; border:1px solid #3b404a; color:#e1e5eb; selection-background-color:#314d78; }
+QHeaderView::section { background:#2c3037; color:#b9c2d1; border:0; padding:6px; }
+QListWidget::item { border-bottom:1px solid #373b42; }
+QListWidget::item:selected { background:#304767; }
+QLabel#muted { color:#a9b3c2; }
+QLabel#title { font-size:17px; font-weight:600; }
+QCheckBox::indicator { width:16px; height:16px; }
+QLabel#poster { background:#16181b; color:#9ba7b8; }
+QProgressBar { background:#333843; max-height:4px; border:none; }
+QProgressBar::chunk { background:#548efa; }
+QSlider::groove:horizontal { height:4px; background:#454951; }
+QSlider::sub-page:horizontal { background:#548efa; }
+QSlider::handle:horizontal { background:#dde5f2; width:12px; border-radius:6px; margin:-4px 0; }
 '''
 
 
@@ -125,7 +127,7 @@ class MediaRow(QWidget):
         super().__init__()
         self.media = media
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setContentsMargins(8, 3, 8, 3)
         layout.setSpacing(12)
         self.check = QCheckBox()
         self.check.setAccessibleName('选择 ' + media.path.name)
@@ -134,15 +136,16 @@ class MediaRow(QWidget):
         self.thumb = QLabel('暂无画面')
         self.thumb.setObjectName('poster')
         self.thumb.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.thumb.setFixedSize(112, 64)
-        text = QVBoxLayout()
+        self.thumb.setFixedSize(62, 38)
+        text = QHBoxLayout()
         name = ElidedLabel(media.key)
         name.setStyleSheet('font-weight: 600')
-        meta = QLabel(f'{duration(media.duration)} · {cached_label(media)}')
+        meta = QLabel(duration(media.duration)); meta.setFixedWidth(40)
+        amount = QLabel(cached_label(media)); amount.setFixedWidth(64); amount.setObjectName('muted')
         meta.setObjectName('muted')
         state = self.state = QLabel(core.LABELS[media.status])
-        state.setStyleSheet('color: ' + ('#0c796d' if media.status in ELIGIBLE else '#996320'))
-        text.addWidget(name); text.addWidget(meta); text.addWidget(state)
+        state.setStyleSheet('color: ' + ('#8eb6f8' if media.status in ELIGIBLE else '#edbc73'))
+        text.addWidget(name, 1); text.addWidget(meta); text.addWidget(amount); text.addWidget(state)
         layout.addWidget(self.check); layout.addWidget(self.thumb); layout.addLayout(text, 1)
 
     def picture(self, image):
@@ -157,6 +160,7 @@ class Window(QMainWindow):
         self.timeout = timeout
         self.rows = []; self.widgets = {}; self.images = {}; self.jobs = []; self.thumb_attempted = set()
         self.active_job = None; self.thumb_job = None; self.busy = False; self.closing = False
+        self.inspection_id = 0
         self.current = None; self.preview_path = None; self.pending_preview = None; self.last_results = None
         self.temp = tempfile.TemporaryDirectory(prefix='cache-lens-gui-')
         self.setWindowTitle('Cache Lens')
@@ -169,7 +173,9 @@ class Window(QMainWindow):
         toolbar = QHBoxLayout()
         title = QLabel('Cache Lens'); title.setObjectName('title')
         logo = QLabel(); logo.setPixmap(QIcon(str(icon_path)).pixmap(28, 28))
-        toolbar.addWidget(logo); toolbar.addWidget(title); toolbar.addStretch()
+        toolbar.addWidget(logo); toolbar.addWidget(title)
+        self.location = ElidedLabel(''); self.location.setText(str(self.cache))
+        toolbar.addWidget(self.location, 1)
         self.scan_button = QPushButton('自动扫描缓存'); self.scan_button.clicked.connect(self.auto_scan)
         self.cache_button = QPushButton('选择缓存目录…'); self.cache_button.clicked.connect(self.choose_cache)
         toolbar.addWidget(self.cache_button); toolbar.addWidget(self.scan_button); layout.addLayout(toolbar)
@@ -181,11 +187,14 @@ class Window(QMainWindow):
             self.filter_buttons.append(button); tools.addWidget(button)
         self.filter_buttons[0].setChecked(True)
         tools.addStretch()
-        self.search = QLineEdit(); self.search.setPlaceholderText('搜索视频'); self.search.setAccessibleName('搜索视频')
+        self.search = QLineEdit(); self.search.setPlaceholderText('搜索文件、路径或编码'); self.search.setAccessibleName('搜索视频')
         self.search.setMaximumWidth(230); self.search.textChanged.connect(self.apply_filter)
-        self.sort = QComboBox(); self.sort.addItems(['默认排序', '大小优先', '时长优先', '名称排序'])
+        self.sort = QComboBox(); self.sort.addItems(['默认排序', '大小优先', '时长优先', '名称排序', '最近修改'])
         self.sort.currentIndexChanged.connect(self.sort_rows)
         tools.addWidget(self.sort); tools.addWidget(self.search); layout.addLayout(tools)
+        self.filter_toggle = QPushButton('筛选'); self.filter_toggle.setCheckable(True); tools.addWidget(self.filter_toggle)
+        drawer = QWidget(); drawer_layout = QVBoxLayout(drawer); drawer_layout.setContentsMargins(0,0,0,0)
+        layout.addWidget(drawer); drawer.hide(); self.filter_toggle.toggled.connect(drawer.setVisible)
         filters = QHBoxLayout()
         self.media_filter = QComboBox()
         self.media_filter.addItems(['视频', '疑似动图 / 贴纸', '全部类型'])
@@ -202,7 +211,7 @@ class Window(QMainWindow):
             field.setMinimumWidth(110)
         filters.addWidget(self.min_size); filters.addWidget(QLabel('—')); filters.addWidget(self.max_size)
         filters.addStretch()
-        layout.addLayout(filters)
+        drawer_layout.addLayout(filters)
         timing = QHBoxLayout(); timing.addWidget(QLabel('时长'))
         self.min_duration = QDoubleSpinBox(); self.max_duration = QDoubleSpinBox()
         for field, name in ((self.min_duration, '最小时长'), (self.max_duration, '最大时长')):
@@ -214,16 +223,31 @@ class Window(QMainWindow):
         timing.addWidget(self.min_duration); timing.addWidget(QLabel('—')); timing.addWidget(self.max_duration)
         timing.addStretch()
         self.thumbnails_button = QPushButton('显示缩略图'); self.thumbnails_button.setCheckable(True)
-        self.thumbnails_button.toggled.connect(self.toggle_thumbnails); timing.addWidget(self.thumbnails_button)
-        self.preview_button = QPushButton('关闭预览'); self.preview_button.setCheckable(True)
-        self.preview_button.toggled.connect(self.toggle_preview); self.preview_button.hide(); timing.addWidget(self.preview_button)
-        layout.addLayout(timing)
+        self.thumbnails_button.toggled.connect(self.toggle_thumbnails)
+        tools.addWidget(self.thumbnails_button)
+        drawer_layout.addLayout(timing)
         splitter = self.splitter = QSplitter(); layout.addWidget(splitter, 1)
         left = QWidget(); left_layout = QVBoxLayout(left); left_layout.setContentsMargins(0,0,0,0)
         self.list = QListWidget(); self.list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.list.currentItemChanged.connect(self.select)
         self.list.itemClicked.connect(self.open_preview)
         self.list.itemActivated.connect(self.open_preview)
+        bulk = QHBoxLayout()
+        self.select_all = QCheckBox('全选当前结果'); self.select_all.setTristate(True)
+        self.select_all.clicked.connect(self.toggle_visible_checks)
+        bulk.addWidget(self.select_all)
+        invert = QPushButton('反选'); invert.clicked.connect(self.invert_visible); bulk.addWidget(invert)
+        clear = QPushButton('清空'); clear.clicked.connect(self.clear_checks); bulk.addWidget(clear)
+        bulk.addStretch(); left_layout.addLayout(bulk)
+        header = QHBoxLayout(); header.setContentsMargins(36,0,8,0)
+        for label, width, mode in [('文件 ID', 0, 3), ('时长', 40, 2), ('已缓存', 64, 1), ('状态', 80, None)]:
+            field = QLabel(label) if mode is None else QToolButton()
+            if mode is not None:
+                field.setText(label); field.setAutoRaise(True)
+                field.clicked.connect(lambda checked=False, m=mode: self.sort.setCurrentIndex(m))
+            if width: field.setFixedWidth(width)
+            header.addWidget(field, 0 if width else 1)
+        left_layout.addLayout(header)
         left_layout.addWidget(self.list)
         self.selection = QLabel('已选 0 项'); self.selection.setObjectName('muted'); left_layout.addWidget(self.selection)
         splitter.addWidget(left)
@@ -242,6 +266,10 @@ class Window(QMainWindow):
         self.clock = QLabel('00:00 / 00:00'); self.clock.setMinimumWidth(100)
         self.mute = QPushButton('静音'); self.mute.setCheckable(True); self.mute.toggled.connect(self.audio.setMuted)
         controls.addWidget(self.play); controls.addWidget(self.seek, 1); controls.addWidget(self.clock); controls.addWidget(self.mute)
+        self.volume = QSlider(Qt.Orientation.Horizontal); self.volume.setRange(0,100); self.volume.setValue(50)
+        self.volume.setMaximumWidth(64); self.volume.setAccessibleName('音量'); self.volume.valueChanged.connect(lambda v:self.audio.setVolume(v/100))
+        controls.addWidget(self.volume)
+        full = QPushButton('全屏'); full.clicked.connect(self.fullscreen); controls.addWidget(full)
         right_layout.addLayout(controls)
         self.player.positionChanged.connect(self.position)
         self.player.durationChanged.connect(lambda value: self.seek.setRange(0,value))
@@ -250,13 +278,17 @@ class Window(QMainWindow):
         self.name = ElidedLabel('请选择视频'); self.name.setObjectName('title'); self.name.setMinimumHeight(28)
         self.metadata = QLabel(''); self.metadata.setObjectName('muted')
         self.state = QLabel(''); self.state.setWordWrap(True)
-        right_layout.addWidget(self.name); right_layout.addWidget(self.metadata); right_layout.addWidget(self.state)
+        right_layout.insertWidget(0, self.name); right_layout.addWidget(self.metadata); right_layout.addWidget(self.state)
         self.details_button = QPushButton('▸ 文件详情'); self.details_button.setCheckable(True)
         self.details = QPlainTextEdit(); self.details.setReadOnly(True); self.details.setMaximumHeight(110); self.details.hide()
         self.details_button.toggled.connect(self.toggle_details)
         right_layout.addWidget(self.details_button); right_layout.addWidget(self.details)
-        self.export_one = QPushButton('导出此视频'); self.export_one.clicked.connect(lambda: self.export_rows([self.current] if self.current else []))
-        right_layout.addWidget(self.export_one); splitter.addWidget(right); splitter.setSizes([510, 570]); right.hide()
+        self.export_one = QPushButton('导出此视频'); self.export_one.setObjectName('primary'); self.export_one.clicked.connect(lambda: self.export_rows([self.current] if self.current else []))
+        right_layout.addWidget(self.export_one)
+        self.inspector = QStackedWidget()
+        self.recovery = RecoveryView(self.watch_clip, self.save_clips)
+        self.inspector.addWidget(right); self.inspector.addWidget(self.recovery)
+        splitter.addWidget(self.inspector); splitter.setSizes([400, 680]); self.inspector.hide(); right.hide()
         self.progress = QProgressBar(); self.progress.setTextVisible(False); self.progress.hide(); layout.addWidget(self.progress)
         status_line = QHBoxLayout()
         self.status = QLabel('点击自动扫描缓存'); self.status.setObjectName('muted')
@@ -283,24 +315,105 @@ class Window(QMainWindow):
     def auto_scan(self):
         self.scan(automatic=True)
 
-    def toggle_preview(self, visible):
-        self.preview_panel.setVisible(visible)
-        self.preview_button.setVisible(visible)
-        if visible:
-            self.splitter.setSizes([510, 570])
-            if self.current and self.current.status in ELIGIBLE:
-                if self.busy: self.pending_preview = self.current.path
-                else: self.toggle_play()
-        else:
-            self.pending_preview = None
-            self.clear_preview()
-            self.stack.setCurrentWidget(self.poster)
-        self.update_actions()
+    def dismiss(self):
+        self.inspection_id += 1
+        self.pending_preview = None
+        self.inspector.hide()
+        self.preview_panel.hide()
+        self.clear_preview()
+        for clip in self.recovery.clips:
+            clip.path.unlink(missing_ok=True)
+        self.recovery.populate([])
 
     def open_preview(self, item):
         if item.isHidden(): return
-        if self.current is not item.data(Qt.ItemDataRole.UserRole): self.select(item)
-        self.preview_button.setChecked(True)
+        row = item.data(Qt.ItemDataRole.UserRole)
+        if self.current is not row: self.select(item)
+        if not self.inspector.isHidden(): return
+        self.inspector.show()
+        self.splitter.setSizes([420, 660])
+        if row.status == 'partial':
+            self.inspector.setCurrentWidget(self.recovery)
+            self.recovery.reset(row)
+            self.status.setText("正在分析缺片文件…")
+        else:
+            self.inspector.setCurrentWidget(self.preview_panel)
+            self.preview_panel.show()
+        self.start_inspection()
+
+    def start_inspection(self):
+        row = self.current
+        if self.busy:
+            self.pending_preview = row.path
+        elif row.status == 'partial':
+            request = self.inspection_id
+            self.task(lambda progress: recovery.recover(row, self.temp.name, self.timeout),
+                      lambda clips: self.recovery_ready(request, row, clips))
+        elif row.status in ELIGIBLE:
+            self.toggle_play()
+
+    def recovery_ready(self, request, row, clips):
+        if self.closing or request != self.inspection_id or self.current is not row or self.inspector.isHidden():
+            for clip in clips: clip.path.unlink(missing_ok=True)
+            return
+        self.recovery.populate(clips)
+        self.filter_summary()
+
+    def save_clips(self, clips):
+        if self.busy or not clips: return
+        row, output = self.current, self.output
+        # Keep selected clip files alive even if a filter changes the inspector during export.
+        hold = tempfile.TemporaryDirectory(dir=self.temp.name)
+        held = []
+        for i, clip in enumerate(clips):
+            path = Path(hold.name)/f'{i}.mp4'
+            os.link(clip.path, path)
+            held.append(recovery.Clip(path, clip.start, clip.length))
+        def save(progress):
+            try:
+                return recovery.export_clips(row, held, output, self.timeout)
+            finally:
+                hold.cleanup()
+        self.recovery.setEnabled(False)
+        self.list.setEnabled(False)
+        self.task(save, self.exported)
+
+    def watch_clip(self, clip):
+        dialog = QDialog(self); dialog.setWindowTitle('片段预览'); dialog.resize(720, 460)
+        layout = QVBoxLayout(dialog); view = VideoPane(); layout.addWidget(view, 1)
+        player = QMediaPlayer(dialog); audio = QAudioOutput(dialog)
+        audio.setVolume(self.audio.volume()); audio.setMuted(self.audio.isMuted())
+        player.setAudioOutput(audio); player.setVideoOutput(view.surface)
+        controls = QHBoxLayout(); pause = QPushButton('暂停')
+        pause.clicked.connect(lambda: player.pause() if player.isPlaying() else player.play())
+        player.playingChanged.connect(lambda on: pause.setText('暂停' if on else '播放'))
+        seek = QSlider(Qt.Orientation.Horizontal); player.durationChanged.connect(lambda d: seek.setRange(0,d))
+        player.positionChanged.connect(seek.setValue); seek.sliderMoved.connect(player.setPosition)
+        controls.addWidget(pause); controls.addWidget(seek); layout.addLayout(controls)
+        player.setSource(QUrl.fromLocalFile(str(clip.path))); player.play()
+        dialog.exec(); player.stop(); dialog.deleteLater()
+
+    def fullscreen(self):
+        if not self.preview_path: return
+        dialog = QDialog(self); layout = QVBoxLayout(dialog); view = VideoPane(); layout.addWidget(view)
+        self.player.setVideoOutput(view.surface); dialog.showFullScreen(); dialog.exec()
+        self.player.setVideoOutput(self.video.surface); dialog.deleteLater()
+
+    def toggle_visible_checks(self):
+        boxes = [self.list.itemWidget(self.list.item(n)).check for n in range(self.list.count())
+                 if not self.list.item(n).isHidden() and self.list.item(n).data(Qt.ItemDataRole.UserRole).status in ELIGIBLE]
+        checked = not all(box.isChecked() for box in boxes)
+        for box in boxes:
+            box.blockSignals(True)
+            box.setChecked(checked)
+            box.blockSignals(False)
+        self.update_actions()
+
+    def invert_visible(self):
+        for n in range(self.list.count()):
+            item = self.list.item(n)
+            box = self.list.itemWidget(item).check
+            if not item.isHidden() and box.isEnabled(): box.toggle()
 
     def clear_preview(self):
         self.player.stop(); self.player.setSource(QUrl())
@@ -360,7 +473,7 @@ class Window(QMainWindow):
             shortest, longest = self.min_duration.value(), self.max_duration.value()
             time_match = (shortest == 0 and longest == 0) or (row.duration is not None
                 and row.duration >= shortest and (longest == 0 or row.duration <= longest))
-            item.setHidden(not (match and type_match and size_match and time_match) or query not in row.path.name.lower())
+            item.setHidden(not (match and type_match and size_match and time_match) or query not in f'{row.path} {row.codec} {row.kind}'.lower())
         if self.list.currentItem() and self.list.currentItem().isHidden(): self.list.setCurrentItem(None)
         if not self.busy: self.filter_summary()
         self.start_thumbnails()
@@ -372,18 +485,18 @@ class Window(QMainWindow):
                 self.status.setText(f'{name}最小值不能大于最大值')
                 return
         visible = sum(not self.list.item(n).isHidden() for n in range(self.list.count()))
-        self.status.setText(f'{visible} / {len(self.rows)} 项' if self.rows else '未找到可识别的视频')
+        self.status.setText(f'当前 {visible} 项，共扫描 {len(self.rows)} 项' if self.rows else '未找到可识别的视频')
 
     def sort_rows(self):
         selected = set(str(r.path) for r in self.checked_rows())
         mode = self.sort.currentIndex()
-        rows = self.rows if mode == 0 else sorted(self.rows, key=(lambda r: -(r.cached_size if r.cached_size is not None else -1)) if mode == 1 else (lambda r: -(r.duration or 0)) if mode == 2 else (lambda r: r.path.name))
+        rows = self.rows if mode == 0 else sorted(self.rows, key=(lambda r: -(r.cached_size if r.cached_size is not None else -1)) if mode == 1 else (lambda r: -(r.duration or 0)) if mode == 2 else (lambda r: -r.fingerprint[3]) if mode == 4 else (lambda r: r.path.name))
         self.populate(rows, selected)
 
     def populate(self, rows, checked=()):
         self.list.clear(); self.widgets.clear()
         for row in rows:
-            item = QListWidgetItem(); item.setData(Qt.ItemDataRole.UserRole, row); item.setSizeHint(QSize(200, 94))
+            item = QListWidgetItem(); item.setData(Qt.ItemDataRole.UserRole, row); item.setSizeHint(QSize(200, 48))
             widget = MediaRow(row, self.update_actions)
             widget.thumb.setVisible(self.thumbnails_button.isChecked())
             self.list.addItem(item); self.list.setItemWidget(item, widget); self.widgets[str(row.path)] = widget
@@ -406,20 +519,28 @@ class Window(QMainWindow):
     def update_actions(self):
         count = self.selected_count()
         hidden = sum(self.list.item(n).isHidden() and self.list.itemWidget(self.list.item(n)).check.isChecked() for n in range(self.list.count()))
-        self.selection.setText(f'已选 {count} 项' + (f'（含隐藏 {hidden} 项）' if hidden else ''))
+        amount = sum(row.cached_size or 0 for row in self.checked_rows())
+        self.selection.setText(f'已选 {count} 项 · {size(amount)}' + (f'（含隐藏 {hidden} 项）' if hidden else ''))
         self.export_selected.setText(f'导出所选（{count}）')
         # Keep the dropdown reachable even with no selection.
         self.export_selected.setEnabled(not self.busy and bool(self.rows))
         self.export_all.setEnabled(not self.busy and any(r.status in ELIGIBLE for r in self.rows))
         permitted = self.current is not None and self.current.status in ELIGIBLE
-        self.preview_button.setEnabled(self.preview_button.isChecked() or (not self.busy and permitted))
+        eligible = sum(not self.list.item(n).isHidden() and self.list.item(n).data(Qt.ItemDataRole.UserRole).status in ELIGIBLE for n in range(self.list.count()))
+        selected_visible = count - hidden
+        state = Qt.CheckState.Unchecked
+        if selected_visible:
+            state = Qt.CheckState.Checked if selected_visible == eligible else Qt.CheckState.PartiallyChecked
+        self.select_all.setCheckState(state)
+        self.select_all.setEnabled(eligible > 0)
+        self.select_all.setText(f'全选可导出项（{eligible}）')
         self.thumbnails_button.setEnabled(self.thumbnails_button.isChecked() or (not self.busy and bool(self.rows)))
         self.play.setEnabled(not self.busy and permitted)
         self.export_one.setEnabled(not self.busy and permitted)
         for widget in (self.scan_button, self.cache_button, self.output_button, self.format, self.sort): widget.setEnabled(not self.busy)
 
     def select(self, item, previous=None):
-        self.preview_button.setChecked(False)
+        self.dismiss()
         self.clear_preview()
         self.stack.setCurrentWidget(self.poster); self.poster.clear(); self.seek.setRange(0,0); self.clock.setText('00:00 / 00:00')
         self.current = item.data(Qt.ItemDataRole.UserRole) if item else None
@@ -437,7 +558,15 @@ class Window(QMainWindow):
     def update_details(self):
         row = self.current
         if row:
-            self.details.setPlainText(f'{row.detail}\n文件大小：{size(row.size)} · 已缓存：{cached_label(row)}\n覆盖率：{row.coverage} · 合并缓存：{row.copies} 份\n{row.path}')
+            try:
+                st = row.path.stat()
+                dates = [f'修改时间：{datetime.fromtimestamp(st.st_mtime):%Y-%m-%d %H:%M:%S}']
+                if hasattr(st, 'st_birthtime'):
+                    dates.append(f'创建时间：{datetime.fromtimestamp(st.st_birthtime):%Y-%m-%d %H:%M:%S}')
+            except OSError:
+                dates = []
+            info = chr(10).join(dates)
+            self.details.setPlainText(f'{row.detail}\n文件大小：{size(row.size)} · 已缓存：{cached_label(row)}\n覆盖率：{row.coverage} · 合并缓存：{row.copies} 份\n{info}\n来源：{row.path}')
 
     def set_poster(self):
         image = self.images.get(str(self.current.path)) if self.current else None
@@ -463,6 +592,7 @@ class Window(QMainWindow):
         job.finished.connect(self.task_finished); job.start()
 
     def task_finished(self):
+        self.list.setEnabled(True); self.recovery.setEnabled(True)
         self.busy = False; self.active_job = None; self.progress.hide(); self.update_actions()
         for widget in self.widgets.values(): widget.state.setText(core.LABELS[widget.media.status])
         if self.current:
@@ -472,7 +602,7 @@ class Window(QMainWindow):
         else:
             if self.pending_preview is not None:
                 pending, self.pending_preview = self.pending_preview, None
-                if self.current and self.current.path == pending and self.preview_button.isChecked(): self.toggle_play()
+                if self.current and self.current.path == pending and not self.inspector.isHidden(): self.start_inspection()
             self.start_thumbnails()
 
     def on_progress(self, n, total, text):
@@ -482,10 +612,12 @@ class Window(QMainWindow):
 
     def show_error(self, message):
         self.status.setText(message)
+        if not self.inspector.isHidden() and self.inspector.currentWidget() is self.recovery:
+            self.recovery.notice.setText(message)
 
     def scan(self, automatic=False):
         if self.busy: return
-        self.preview_button.setChecked(False)
+        self.dismiss()
         self.thumbnails_button.setChecked(False)
         self.status.setText('正在定位并扫描…' if automatic else '正在扫描…')
         self.scan_has_progress = False
@@ -497,6 +629,7 @@ class Window(QMainWindow):
             return root, core.scan(root, progress=progress, timeout=self.timeout)
         def done(result):
             self.cache, rows = result
+            self.location.setText(str(self.cache))
             self.scanned(rows)
         self.task(operation, done)
         job = self.active_job
@@ -537,11 +670,12 @@ class Window(QMainWindow):
             return
         row = self.current
         self.status.setText('验证并准备播放…')
-        self.task(lambda progress: (row.path, core.export(row, self.temp.name, 'mp4', self.timeout)), self.prepared)
+        request = self.inspection_id
+        self.task(lambda progress: (request, row.path, core.export(row, self.temp.name, 'mp4', self.timeout)), self.prepared)
 
     def prepared(self, result):
-        source, path = result
-        if self.closing or not self.preview_button.isChecked() or not self.current or self.current.path != source:
+        request, source, path = result
+        if request != self.inspection_id or self.closing or self.inspector.isHidden() or not self.current or self.current.path != source:
             path.unlink(missing_ok=True)
             return
         self.preview_path = path
@@ -581,9 +715,9 @@ def launch(cache=None, output=None, timeout=600):
     app = QApplication.instance() or QApplication(sys.argv[:1])
     app.setApplicationName('Cache Lens'); app.setOrganizationName('TG Cache Lens')
     app.setStyle('Fusion')
-    palette = QPalette(); palette.setColor(QPalette.ColorRole.Window, QColor('#fafbfc'))
-    palette.setColor(QPalette.ColorRole.WindowText, QColor('#202b30')); palette.setColor(QPalette.ColorRole.Base, QColor('#ffffff'))
-    palette.setColor(QPalette.ColorRole.Text, QColor('#202b30')); palette.setColor(QPalette.ColorRole.Highlight, QColor('#0c8579'))
+    palette = QPalette(); palette.setColor(QPalette.ColorRole.Window, QColor('#202227'))
+    palette.setColor(QPalette.ColorRole.WindowText, QColor('#ecedf0')); palette.setColor(QPalette.ColorRole.Base, QColor('#272a30'))
+    palette.setColor(QPalette.ColorRole.Text, QColor('#ecedf0')); palette.setColor(QPalette.ColorRole.Highlight, QColor('#326dd5'))
     app.setPalette(palette)
     window = Window(cache, output, timeout); window.show()
     return app.exec()
