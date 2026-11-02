@@ -4,13 +4,14 @@ import subprocess
 import sys
 import tempfile
 
-from PySide6.QtCore import Qt, QThread, Signal, QTimer, QUrl, QSize
+from PySide6.QtCore import Qt, QThread, Signal, QTimer, QUrl, QSize, QSizeF
 from PySide6.QtGui import QPixmap, QImage, QIcon, QDesktopServices, QPalette, QColor
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
-from PySide6.QtMultimediaWidgets import QVideoWidget
+from PySide6.QtMultimediaWidgets import QGraphicsVideoItem
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QLineEdit, QComboBox, QListWidget, QListWidgetItem, QCheckBox,
-    QSplitter, QSlider, QToolButton, QMenu, QFileDialog, QProgressBar, QPlainTextEdit, QStackedWidget, QDoubleSpinBox, QMessageBox)
+    QSplitter, QSlider, QToolButton, QMenu, QFileDialog, QProgressBar, QPlainTextEdit, QStackedWidget, QDoubleSpinBox, QMessageBox,
+    QGraphicsView, QGraphicsScene, QFrame, QSizePolicy)
 from . import core
 from .cli import duration, size, batch
 
@@ -96,6 +97,27 @@ class ElidedLabel(QLabel):
     def resizeEvent(self, event):
         self.refresh()
         super().resizeEvent(event)
+
+
+class VideoPane(QGraphicsView):
+    """Draw the video inside the viewport, including during splitter resizing."""
+    def __init__(self):
+        super().__init__()
+        scene = QGraphicsScene(self)
+        self.setScene(scene)
+        self.surface = QGraphicsVideoItem()
+        scene.addItem(self.surface)
+        self.setBackgroundBrush(Qt.GlobalColor.black)
+        self.setFrameShape(QFrame.Shape.NoFrame)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        bounds = self.viewport().rect()
+        self.setSceneRect(0, 0, bounds.width(), bounds.height())
+        self.surface.setSize(QSizeF(bounds.size()))
 
 
 class MediaRow(QWidget):
@@ -206,12 +228,13 @@ class Window(QMainWindow):
         self.selection = QLabel('已选 0 项'); self.selection.setObjectName('muted'); left_layout.addWidget(self.selection)
         splitter.addWidget(left)
         right = self.preview_panel = QWidget(); right_layout = QVBoxLayout(right); right_layout.setContentsMargins(16,0,0,0); right_layout.setSpacing(12)
-        self.stack = QStackedWidget(); self.stack.setMinimumHeight(245)
+        self.stack = QStackedWidget(); self.stack.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
         self.poster = QLabel('扫描后选择一个视频'); self.poster.setAlignment(Qt.AlignmentFlag.AlignCenter); self.poster.setObjectName('poster')
-        self.video = QVideoWidget()
+        self.poster.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
+        self.video = VideoPane()
         self.stack.addWidget(self.poster); self.stack.addWidget(self.video); right_layout.addWidget(self.stack, 1)
         self.player = QMediaPlayer(self); self.audio = QAudioOutput(self); self.audio.setVolume(0.5)
-        self.player.setAudioOutput(self.audio); self.player.setVideoOutput(self.video)
+        self.player.setAudioOutput(self.audio); self.player.setVideoOutput(self.video.surface)
         controls = QHBoxLayout()
         self.play = QPushButton('播放'); self.play.clicked.connect(self.toggle_play); self.play.setFixedWidth(70)
         self.seek = QSlider(Qt.Orientation.Horizontal); self.seek.setAccessibleName('播放进度'); self.seek.setRange(0,0)

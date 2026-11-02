@@ -72,7 +72,7 @@ def test_gui_selection_filter_export(window):
 def test_gui_preview_and_failure(window):
     window.scan(); wait_for(lambda: len(window.rows)==3 and not window.busy)
     frames=[]
-    window.video.videoSink().videoFrameChanged.connect(lambda frame: frames.append(frame.isValid()))
+    window.player.videoSink().videoFrameChanged.connect(lambda frame: frames.append(frame.isValid()))
     click_row(window)
     wait_for(lambda: window.preview_path is not None and not window.busy)
     wait_for(lambda: any(frames))
@@ -310,3 +310,25 @@ def test_click_another_video_while_preview_prepares(window, monkeypatch):
     wait_for(lambda: len(outputs) == 2 and not window.busy)
     assert not outputs[0].exists() and outputs[1] == window.preview_path
     assert window.current.path == requested and not window.preview_panel.isHidden()
+
+
+@pytest.mark.parametrize('width,height', [(160, 90), (90, 160)])
+def test_resized_video_stays_above_controls(window, width, height):
+    from PySide6.QtGui import QImage
+    from PySide6.QtMultimedia import QVideoFrame
+    from PySide6.QtCore import QPoint
+
+    window.preview_panel.show()
+    window.stack.setCurrentWidget(window.video)
+    frame = QImage(width, height, QImage.Format.Format_RGB32)
+    frame.fill(Qt.GlobalColor.green)
+    window.player.videoSink().setVideoFrame(QVideoFrame(frame))
+    for w, h in [(1120, 760), (900, 640)]:
+        window.resize(w, h)
+        QApplication.processEvents()
+        viewport = window.video.viewport()
+        bottom = viewport.mapTo(window, viewport.rect().bottomLeft()).y()
+        assert window.video.surface.size().toSize() == viewport.size()
+        for control in (window.play, window.seek, window.clock, window.mute):
+            assert bottom < control.mapTo(window, QPoint(0, 0)).y()
+            assert window.rect().contains(control.mapTo(window, control.rect().bottomRight()))
