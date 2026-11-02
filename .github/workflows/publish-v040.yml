@@ -1,0 +1,49 @@
+name: Publish Cache Lens v0.4.0
+on:
+  push:
+    branches: [release/publish-v0.4.0]
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: macos-14
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Restore and verify release source
+        run: |
+          git bundle verify publish-source.bundle
+          git fetch ./publish-source.bundle refs/heads/main
+          test "$(git rev-parse FETCH_HEAD)" = 6cd3384d5a92a2ca4c948f7eb952fc1717815062
+          git merge-base --is-ancestor origin/main FETCH_HEAD
+          git switch --detach FETCH_HEAD
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.9.7'
+      - name: Test and build
+        run: |
+          test "$(uname -m)" = arm64
+          brew list ffmpeg >/dev/null || brew install ffmpeg
+          uv sync --frozen --extra gui --python 3.12
+          uv run --extra gui pytest -q
+          ./scripts/build_macos.sh
+          codesign --verify --deep --strict 'build/Cache Lens.app'
+          test "$(build/tg-cache-lens/tg-cache-lens --version)" = 0.4.0
+          uv build --out-dir dist
+          (cd build && zip -qry ../dist/tg-cache-lens-0.4.0-macos-arm64.zip 'Cache Lens.app' tg-cache-lens)
+          (cd dist && shasum -a 256 *.zip *.whl *.tar.gz > SHA256SUMS-0.4.0.txt)
+      - name: Sync main and publish verified assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git push origin HEAD:refs/heads/main
+          gh release create v0.4.0 --draft --target "$(git rev-parse HEAD)" --title 'v0.4.0 · 媒体检视与缺片恢复' --notes '深色媒体检视台、点击预览、批量筛选和可验证的缺片恢复。Apple Silicon 版本需要外部 FFmpeg。'
+          gh release upload v0.4.0 dist/*.zip dist/*.whl dist/*.tar.gz dist/SHA256SUMS-0.4.0.txt
+          dest="$(mktemp -d)"
+          gh release download v0.4.0 --dir "$dest"
+          cmp dist/SHA256SUMS-0.4.0.txt "$dest/SHA256SUMS-0.4.0.txt"
+          (cd "$dest" && shasum -a 256 -c SHA256SUMS-0.4.0.txt)
+          gh release edit v0.4.0 --draft=false --latest
