@@ -34,10 +34,10 @@ def progress_line(n, total, text):
         print(file=sys.stderr, flush=True)
 
 
-def batch(rows, output, fmt='mp4', timeout=600, progress=lambda *args: None):
+def batch(rows, output, fmt='mp4', timeout=600, progress=lambda *args: None, on_failure=lambda row: None):
     results, errors = [], []
     for n, row in enumerate(rows, 1):
-        progress(n-1, len(rows), f'正在导出 {n}/{len(rows)}')
+        progress(n-1, len(rows), f'正在导出 {n}/{len(rows)} · {row.key}')
         try:
             from . import recovery
             if recovery.can_export_cached(row):
@@ -60,6 +60,7 @@ def batch(rows, output, fmt='mp4', timeout=600, progress=lambda *args: None):
                 results.append(core.export(row, output, fmt, timeout))
         except (OSError, RuntimeError, ValueError) as e:
             errors.append(f'{row.path.name}: {e}')
+            on_failure(row)
     progress(len(rows), len(rows), f'成功 {len(results)} 项 · 失败 {len(errors)} 项')
     return results, errors
 

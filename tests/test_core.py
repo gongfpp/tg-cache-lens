@@ -3,6 +3,26 @@ import os
 import struct
 import pytest
 from tg_cache_lens import core
+
+
+def test_cancel_terminates_active_media_subprocess():
+    import sys
+    import threading
+    import time
+    event = threading.Event()
+    outcomes = []
+    def run():
+        try:
+            with core.cancel_scope(event):
+                core.run([sys.executable, '-c', 'import time; time.sleep(20)'], 30)
+        except core.WorkCancelled:
+            outcomes.append('cancelled')
+    thread = threading.Thread(target=run)
+    thread.start()
+    time.sleep(.3)
+    event.set()
+    thread.join(5)
+    assert not thread.is_alive() and outcomes == ['cancelled']
 from conftest import write_map
 
 @pytest.mark.skipif(os.name != 'nt', reason='Windows WinGet discovery')

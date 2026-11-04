@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 import json
+import locale
 import math
 import os
 import re
@@ -12,6 +14,9 @@ import shutil
 import struct
 import subprocess
 import sys
+import tempfile
+import threading
+import time
 import zlib
 
 LABELS = {"ready": "完整可导出", "covered": "数据齐全·待验证", "partial": "数据不全",
@@ -127,15 +132,67 @@ def binary(name):
         raise RuntimeError(f"找不到 {name}。{hint}")
     return path
 
-def run(command, timeout=30):
+class WorkCancelled(BaseException):
+    pass
+
+
+_cancel_context = threading.local()
+
+
+@contextmanager
+def cancel_scope(event):
+    previous = getattr(_cancel_context, 'event', None)
+    _cancel_context.event = event
     try:
-        p = subprocess.run(command, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=timeout,
-                           creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
-    except subprocess.TimeoutExpired as e:
-        raise RuntimeError("处理超时；可通过 --timeout 增加时限") from e
-    if p.returncode:
-        raise RuntimeError(p.stderr.strip()[-700:] or "媒体工具处理失败")
-    return p.stdout, p.stderr
+        yield
+    finally:
+        _cancel_context.event = previous
+
+
+def current_cancel_event():
+    return getattr(_cancel_context, 'event', None)
+
+
+def propagate_cancel(function):
+    event = current_cancel_event()
+    def wrapped(*args):
+        with cancel_scope(event):
+            return function(*args)
+    return wrapped
+
+
+def run(command, timeout=30):
+    event = current_cancel_event()
+    if event is not None and event.is_set(): raise WorkCancelled()
+    # File-backed output avoids waiting for inherited pipe handles from other
+    # concurrently launched Windows media processes.
+    with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
+        process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr,
+                                   creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
+        deadline = time.monotonic() + timeout
+        try:
+            while True:
+                if event is not None and event.is_set(): raise WorkCancelled()
+                remaining = deadline - time.monotonic()
+                if remaining <= 0: raise subprocess.TimeoutExpired(command, timeout)
+                try:
+                    process.wait(timeout=min(.2, remaining))
+                    break
+                except subprocess.TimeoutExpired:
+                    continue
+        except BaseException as exc:
+            process.kill()
+            process.wait()
+            if isinstance(exc, subprocess.TimeoutExpired):
+                raise RuntimeError('处理超时；可通过 --timeout 增加时限') from exc
+            raise
+        stdout.seek(0); stderr.seek(0)
+        encoding = locale.getpreferredencoding(False)
+        output = stdout.read().decode(encoding, errors='replace')
+        errors = stderr.read().decode(encoding, errors='replace')
+        if process.returncode:
+            raise RuntimeError(errors.strip()[-700:] or '媒体工具处理失败')
+        return output, errors
 
 def signature_bytes(b):
     if b[4:8] == b"ftyp": return "mp4"

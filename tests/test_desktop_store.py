@@ -63,7 +63,7 @@ def test_missing_version_marker_uses_zero(tmp_path):
     assert directory == db/'0' and entries == {}
 
 
-def test_reconstruct_synthetic_verified_ranges(tmp_path):
+def test_reconstruct_synthetic_verified_ranges(tmp_path, monkeypatch):
     key = bytes(range(256))
     db = tmp_path/'tdata'/'user_data'/'media_cache'
     version = db/'0'
@@ -86,6 +86,15 @@ def test_reconstruct_synthetic_verified_ranges(tmp_path):
     assert not ambiguous and not unavailable
     assert ranges == [(0, 8), (10, 13)]
     assert parts[1].data == b'abc'
+    from tempfile import TemporaryFile
+    from tg_cache_lens.desktop_store import DiskSlice
+    with TemporaryFile() as spool:
+        stored, stored_ranges, stored_ambiguous, stored_unavailable, stored_identity = read_document(
+            db, (0x10001, 0x10000), key, spool=spool)
+        assert all(isinstance(part.data, DiskSlice) for part in stored)
+        assert [part.data[:] for part in stored] == [part.data for part in parts]
+        assert (stored_ranges, stored_ambiguous, stored_unavailable, stored_identity) == (ranges, ambiguous, unavailable, identity)
+    monkeypatch.setattr('tg_cache_lens.desktop_materialize.SPOOL_THRESHOLD', 0)
     snapshot = tmp_path/'temporary'/'snapshot'
     source = materialize(db, (0x10001, 0x10000), key, snapshot)
     assert snapshot.read_bytes() == b'0000ftyp\0\0abc'

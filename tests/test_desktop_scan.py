@@ -311,8 +311,9 @@ def test_cli_scans_synthetic_desktop_with_password(cache, tmp_path, monkeypatch,
     assert str(root) in rows[0]['path']
 
 
-def test_small_cache_and_corrupt_entry_do_not_hide_other_videos(cache, tmp_path, capsys):
+def test_small_cache_and_corrupt_entry_do_not_hide_other_videos(cache, tmp_path, capsys, monkeypatch):
     from tg_cache_lens.__main__ import main
+    from tg_cache_lens import desktop_scan, desktop_store
     root, video = make_desktop(cache, tmp_path)
     database = root/'user_data'/'cache'
     version = database/'1'; version.mkdir(parents=True)
@@ -330,7 +331,15 @@ def test_small_cache_and_corrupt_entry_do_not_hide_other_videos(cache, tmp_path,
     write_container(version/'binlog', bytes(range(256)), bytes(16) + b''.join(records))
     write_container(version/'30'/'000000000000', bytes(range(256)), b'incorrect')
     workdir = tmp_path/'work'; workdir.mkdir()
+    reads = []
+    original_read = desktop_store.read_value
+    def counted_read(directory, entry, key):
+        reads.append(entry.key)
+        return original_read(directory, entry, key)
+    monkeypatch.setattr(desktop_scan, 'read_value', counted_read)
+    monkeypatch.setattr(desktop_store, 'read_value', counted_read)
     rows = scan(root, workdir)
+    assert reads.count((0x101, 1)) == 1
     assert sorted(row.status for row in rows) == ['partial', 'unknown']
     assert len(rows.warnings) == 1 and '校验' in rows.warnings[0]
     plain = next(row for row in rows if row.status == 'partial')
@@ -533,7 +542,8 @@ def test_unclassifiable_last_slice_does_not_hide_verified_prefix(cache, tmp_path
 
 
 def test_scanning_multiple_videos_reuses_verified_index(cache, tmp_path, monkeypatch):
-    from tg_cache_lens import desktop_store
+    import threading
+    from tg_cache_lens import desktop_store, desktop_scan
     root, video = make_desktop(cache, tmp_path)
     version = root/'user_data'/'media_cache'/'0'
     key = bytes(range(256))
@@ -551,9 +561,66 @@ def test_scanning_multiple_videos_reuses_verified_index(cache, tmp_path, monkeyp
         if path.name == 'binlog': calls.append(path)
         return original(path, key)
     monkeypatch.setattr(desktop_store, 'read_tdef', counted)
+    original_inspect = desktop_scan.core.inspect
+    first_blocked, release, shown = threading.Event(), threading.Event(), threading.Event()
+    def delayed_inspect(path, *args, **kwargs):
+        if Path(path).name.startswith('00000000-'):
+            first_blocked.set()
+            if not release.wait(15): raise RuntimeError('synthetic timeout')
+        return original_inspect(path, *args, **kwargs)
+    monkeypatch.setattr(desktop_scan.core, 'inspect', delayed_inspect)
     workdir = tmp_path/'work'; workdir.mkdir()
-    rows = scan(root, workdir)
+    received, result = [], []
+    def on_row(row):
+        received.append(row)
+        shown.set()
+    thread = threading.Thread(target=lambda: result.append(scan(root, workdir, on_row=on_row)))
+    thread.start()
+    try:
+        assert first_blocked.wait(10) and shown.wait(10)
+        assert thread.is_alive() and received[0].desktop_source.base_key == (0x10001, 0x20000)
+    finally:
+        release.set()
+        thread.join(20)
+    assert not thread.is_alive()
+    rows = result[0]
     assert len(rows) == 2 and len(calls) == 1
+
+
+@pytest.mark.parametrize('stop', [False, True])
+def test_gui_shows_scan_results_before_completion_and_keeps_selection(cache, tmp_path, monkeypatch, stop):
+    import threading
+    from PySide6.QtWidgets import QApplication
+    from tg_cache_lens import core, desktop_scan
+    from tg_cache_lens.gui import Window
+    from test_gui import wait_for, click
+    app = QApplication.instance() or QApplication([])
+    root, _ = make_desktop(cache, tmp_path)
+    row = next(item for item in core.scan(cache) if item.status == 'covered')
+    ready, release = threading.Event(), threading.Event()
+    def staged_scan(*args, on_row, **kwargs):
+        on_row(row)
+        ready.set()
+        if not release.wait(15): raise RuntimeError('synthetic timeout')
+        result = desktop_scan.ScanResults(); result.append(row)
+        return result
+    monkeypatch.setattr(desktop_scan, 'scan', staged_scan)
+    window = Window(root, tmp_path/'exports')
+    window.thumbnails_button.setChecked(False)
+    window.show()
+    try:
+        window.scan()
+        wait_for(lambda: ready.is_set() and len(window.rows) == 1)
+        assert window.busy and window.list.count() == 1
+        window.list.setCurrentItem(window.list.item(0))
+        if stop: click(window.stop_button)
+        release.set()
+        wait_for(lambda: not window.busy)
+        assert window.list.count() == 1 and window.rows[0] is row and window.current is row
+    finally:
+        release.set()
+        window.close()
+        app.processEvents()
 
 
 def test_missing_and_damaged_slices_preserve_verified_video(cache, tmp_path):

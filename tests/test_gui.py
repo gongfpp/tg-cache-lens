@@ -91,6 +91,30 @@ def test_output_directory_is_restored_after_restart(cache, tmp_path, app, monkey
     second.close()
 
 
+def test_bulk_skip_exported_and_retry_failed_rows(window, monkeypatch):
+    from dataclasses import replace
+    row = next(item for item in core.scan(window.cache) if item.status == 'covered')
+    other = replace(row, path=row.path.with_name('other-video'))
+    window.scanned([row, other])
+    window.output.mkdir(parents=True)
+    (window.output / f'{row.key}.mp4').touch()
+    window.skip_exported_action.setChecked(True)
+    calls = []
+    def fake_batch(rows, output, fmt, timeout, progress, on_failure):
+        calls.append(list(rows))
+        if len(calls) == 1:
+            on_failure(rows[0])
+            return [], ['synthetic failure']
+        return [output / 'other-video.mp4'], []
+    monkeypatch.setattr('tg_cache_lens.gui.batch', fake_batch)
+    window.export_rows([row, other])
+    wait_for(lambda: not window.busy)
+    assert calls == [[other]] and window.retry_button.isVisible()
+    click(window.retry_button)
+    wait_for(lambda: not window.busy)
+    assert calls == [[other], [other]] and not window.retry_button.isVisible()
+
+
 def test_preview_cleanup_retries_a_temporarily_locked_file(window, monkeypatch):
     target = Path(window.temp.name)/'preview.mp4'
     target.write_bytes(b'synthetic')
@@ -601,3 +625,22 @@ def test_fragment_export_keeps_clips_when_filter_changes(window, monkeypatch):
         release.set()
     wait_for(lambda: not window.busy)
     wait_for(lambda: all(not clip.path.exists() for clip in clips))
+
+
+def test_failed_fragment_merge_can_be_retried(window, monkeypatch):
+    from test_recovery import broken_movie
+    row = broken_movie(window.cache)
+    window.scanned([row]); window.media_filter.setCurrentIndex(2)
+    click_row(window); wait_for(lambda: not window.busy)
+    clips = list(window.recovery.clips)
+    calls = []
+    def export(*args):
+        calls.append(args[1])
+        return ([], ['synthetic failure']) if len(calls) == 1 else ([window.output/'result.mp4'], [])
+    monkeypatch.setattr('tg_cache_lens.gui.recovery.export_merged_clips', export)
+    window.save_clips(clips)
+    wait_for(lambda: not window.busy)
+    assert window.retry_button.isVisible()
+    click(window.retry_button)
+    wait_for(lambda: not window.busy)
+    assert len(calls) == 2 and not window.retry_button.isVisible()

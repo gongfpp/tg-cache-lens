@@ -1,13 +1,23 @@
 """Create temporary, range-indexed media snapshots from Desktop cache parts."""
 from dataclasses import dataclass
+from contextlib import nullcontext
 from hashlib import sha256
 from pathlib import Path
 import struct
+import tempfile
 import zlib
 
 from .desktop_store import read_document, read_plain, read_index_snapshot
+from . import core
 from .desktop_parts import Part
 from .sparse import prepare_sparse
+
+SPOOL_THRESHOLD = 64 * 1024 * 1024
+
+
+def document_spool(snapshot, base_key, directory=None):
+    group = snapshot.groups.get(base_key, {})
+    return tempfile.TemporaryFile(dir=directory) if sum(entry.size for entry in group.values()) > SPOOL_THRESHOLD else nullcontext(None)
 
 
 @dataclass(frozen=True)
@@ -21,7 +31,9 @@ class DocumentSource:
     cache_time: int | None = None
 
     def revalidate(self):
-        _, _, ambiguous, unavailable, identity = read_document(self.database, self.base_key, self.local_key)
+        snapshot = read_index_snapshot(self.database, self.local_key)
+        with document_spool(snapshot, self.base_key) as spool:
+            _, _, ambiguous, unavailable, identity = read_document(self.database, self.base_key, self.local_key, snapshot, spool)
         if identity != self.content_hash or ambiguous != self.ambiguous or unavailable != self.unavailable:
             raise RuntimeError('Desktop 缓存内容已变化，请重新扫描')
 
@@ -67,8 +79,10 @@ def write_snapshot(database, destination, parts, ranges):
             if ranges[0][0] or len(ranges) > 1:
                 prepare_sparse(output)
             for part in parts:
+                event = core.current_cancel_event()
+                if event is not None and event.is_set(): raise core.WorkCancelled()
                 output.seek(part.offset)
-                output.write(part.data)
+                output.write(part.data[:] if not isinstance(part.data, bytes) else part.data)
         payload = struct.pack('<q', -1) + b''.join(
             struct.pack('<qq', start, end - start) for start, end in ranges)
         metadata = struct.pack('<IIi', 0x7bac1487, zlib.crc32(payload), len(ranges)) + payload
@@ -86,15 +100,17 @@ def write_snapshot(database, destination, parts, ranges):
 def materialize(database, base_key, local_key, destination, snapshot=None):
     validate_destination(database, destination)
     snapshot = snapshot or read_index_snapshot(database, local_key)
-    parts, ranges, ambiguous, unavailable, identity = read_document(database, base_key, local_key, snapshot)
-    write_snapshot(database, destination, parts, ranges)
+    Path(destination).parent.mkdir(parents=True, exist_ok=True)
+    with document_spool(snapshot, base_key, Path(destination).parent) as spool:
+        parts, ranges, ambiguous, unavailable, identity = read_document(database, base_key, local_key, snapshot, spool)
+        write_snapshot(database, destination, parts, ranges)
     times = [entry.store_time for entry in snapshot.groups[base_key].values() if entry.store_time]
     return DocumentSource(Path(database).resolve(), base_key, local_key, identity, ambiguous, unavailable, max(times) if times else None)
 
 
-def materialize_plain(database, entry_key, local_key, destination, snapshot=None):
+def materialize_plain(database, entry_key, local_key, destination, snapshot=None, value_and_entry=None):
     validate_destination(database, destination)
-    value, entry = read_plain(database, entry_key, local_key, snapshot)
+    value, entry = value_and_entry if value_and_entry is not None else read_plain(database, entry_key, local_key, snapshot)
     partial = value.startswith(b'partial:')
     data = value[8:] if partial else value
     if not data:

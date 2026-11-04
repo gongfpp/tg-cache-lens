@@ -8,6 +8,7 @@ from hashlib import sha256
 import xxhash
 
 from .desktop_crypto import read_tdef
+from . import core
 from .desktop_index import parse_binlog
 from .desktop_parts import (AmbiguousSlice, Part, available_ranges, decode_header_prefix,
                             decode_slice, group_documents, matching_final_slice)
@@ -15,6 +16,24 @@ from .desktop_parts import (AmbiguousSlice, Part, available_ranges, decode_heade
 
 class CacheChanged(ValueError):
     """A cache file changed while being read."""
+
+
+class DiskSlice:
+    """A part held in a temporary spool rather than in the Python heap."""
+    def __init__(self, stream, start, length):
+        self.stream, self.start, self.length = stream, start, length
+
+    def __len__(self): return self.length
+
+    def __getitem__(self, key):
+        if not isinstance(key, slice): raise TypeError('slice required')
+        start, stop, step = key.indices(self.length)
+        if step != 1: raise ValueError('unsupported slice step')
+        self.stream.seek(self.start + start)
+        return self.stream.read(max(0, stop - start))
+
+    def view(self, start, end):
+        return DiskSlice(self.stream, self.start + start, end - start)
 
 
 def databases(tdata, data_name='data'):
@@ -114,7 +133,7 @@ def read_plain(database, entry_key, key, snapshot=None):
     return value, entry
 
 
-def read_document(database, base_key, key, snapshot=None):
+def read_document(database, base_key, key, snapshot=None, spool=None):
     """Read a consistent indexed document's verified parts and ranges.
 
     The returned ranges describe only cached bytes, not original file length.
@@ -133,8 +152,18 @@ def read_document(database, base_key, key, snapshot=None):
     paths = [directory / entry.relative_path() for entry in group.values()]
     stamps = [optional_stamp(path) for path in paths]
     parts, ambiguous, unavailable = [], [], []
+    def add_parts(number, decoded):
+        for part in decoded:
+            if spool is not None:
+                spool.seek(0, 2)
+                start = spool.tell()
+                spool.write(part.data)
+                part = Part(part.offset, DiskSlice(spool, start, len(part.data)))
+            parts.append((number, part))
     identity = sha256()
     for number, entry in sorted(group.items()):
+        event = core.current_cancel_event()
+        if event is not None and event.is_set(): raise core.WorkCancelled()
         identity.update(struct.pack('<IQQIBI', number, *entry.key, entry.size, entry.tag, entry.checksum))
         identity.update(entry.place)
         path = directory / entry.relative_path()
@@ -156,21 +185,21 @@ def read_document(database, base_key, key, snapshot=None):
         identity.update(b'valid')
         identity.update(sha256(value).digest())
         try:
-            parts.extend((number, part) for part in decode_slice(value, number))
+            add_parts(number, decode_slice(value, number))
         except AmbiguousSlice:
             matched = matching_final_slice(value, number, (part for _, part in parts))
             if matched:
-                parts.extend((number, part) for part in matched)
+                add_parts(number, matched)
             else:
                 ambiguous.append(number)
         except ValueError:
             matched = matching_final_slice(value, number, (part for _, part in parts))
             if matched:
-                parts.extend((number, part) for part in matched)
+                add_parts(number, matched)
                 continue
             if number == 0:
                 try:
-                    parts.extend((number, part) for part in decode_header_prefix(value))
+                    add_parts(number, decode_header_prefix(value))
                 except ValueError:
                     pass
             unavailable.append(number)
@@ -179,6 +208,8 @@ def read_document(database, base_key, key, snapshot=None):
     parts.sort(key=lambda item: item[1].offset)
     conflicts, affected = [], set()
     for i, (number, part) in enumerate(parts):
+        event = core.current_cancel_event()
+        if event is not None and event.is_set(): raise core.WorkCancelled()
         for other_number, other in parts[i + 1:]:
             start = other.offset
             end = min(part.offset + len(part.data), other.offset + len(other.data))
@@ -195,7 +226,8 @@ def read_document(database, base_key, key, snapshot=None):
                 ranges = [(a, b) for left, right in ranges
                           for a, b in ((left, min(right, start)), (max(left, end), right))
                           if a < b]
-            clean.extend(Part(start, part.data[start - part.offset:end - part.offset])
+            clean.extend(Part(start, part.data.view(start - part.offset, end - part.offset)
+                              if isinstance(part.data, DiskSlice) else part.data[start - part.offset:end - part.offset])
                          for start, end in ranges)
         parts = clean
         unavailable = sorted(set(unavailable) | affected)

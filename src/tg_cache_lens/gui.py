@@ -8,6 +8,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import threading
 
 from PySide6.QtCore import Qt, QThread, Signal, QTimer, QUrl, QSize, QSizeF, QSettings, QEvent
 from PySide6.QtGui import QPixmap, QImage, QIcon, QDesktopServices, QPalette, QColor
@@ -51,7 +52,7 @@ def exported_states(rows, output):
     remaining = set(names)
     for row in sorted(rows, key=lambda item: len(item.key), reverse=True):
         base = re.sub(r'[^\w.-]', '_', row.key)
-        full = re.compile(rf'^{re.escape(base)}(?:-cached-unknown)?(?:-\d+)?\.(?:mp4|mkv|mov|webm)$', re.IGNORECASE)
+        full = re.compile(rf'^{re.escape(base)}(?:-cached-unknown)?(?:-\d+)?\.(?:mp4|mkv|mov|webm|avi)$', re.IGNORECASE)
         partial = re.compile(rf'^{re.escape(base)}-partial-\d+(?:\.\d+)?s-\d+(?:\.\d+)?s(?:-\d+)?\.mp4$', re.IGNORECASE)
         full_names = {name for name in remaining if full.fullmatch(name)}
         partial_names = {name for name in remaining if partial.fullmatch(name)}
@@ -114,8 +115,7 @@ QSlider::handle:horizontal { background:#dde5f2; width:12px; border-radius:6px; 
 '''
 
 
-class AnalysisCancelled(BaseException):
-    pass
+AnalysisCancelled = core.WorkCancelled
 
 
 class Job(QThread):
@@ -123,22 +123,27 @@ class Job(QThread):
     result = Signal(object)
     failed = Signal(str)
     clip_ready = Signal(object)
+    row_ready = Signal(object)
 
     def __init__(self, operation, parent=None):
         super().__init__(parent)
         self.operation = operation
         self.streaming = False
+        self.cancel_event = threading.Event()
+
+    def requestInterruption(self):
+        self.cancel_event.set()
+        super().requestInterruption()
 
     def run(self):
         def report(*args):
             if self.isInterruptionRequested(): raise AnalysisCancelled()
             self.progress.emit(*args)
         try:
-            result = self.operation(report)
+            with core.cancel_scope(self.cancel_event):
+                result = self.operation(report)
             if not self.isInterruptionRequested():
                 self.result.emit(result)
-            elif isinstance(result, tuple) and len(result) == 3 and hasattr(result[2], 'cleanup'):
-                result[2].cleanup()
             elif isinstance(result, list) and not self.streaming:
                 for item in result:
                     if isinstance(item, recovery.Clip): item.path.unlink(missing_ok=True)
@@ -307,6 +312,8 @@ class Window(QMainWindow):
         self.export_hold_job = None; self.export_held_paths = set(); self.deferred_removals = set()
         self.inspection_id = 0
         self.current = None; self.preview_path = None; self.pending_preview = None; self.last_results = None
+        self.failed_export_rows = []
+        self.failed_export_clips = ()
         self.temp = tempfile.TemporaryDirectory(prefix='cache-lens-gui-')
         self.desktop_owner = None; self.retired_desktop = []; self.retirement_pending = False
         self.setWindowTitle('Cache Lens')
@@ -503,7 +510,8 @@ class Window(QMainWindow):
         self.status = QLabel('选择目录或重新扫描目录'); self.status.setObjectName('muted')
         self.status.setWordWrap(True); status_line.addWidget(self.status, 1)
         self.errors_button = QPushButton('查看失败原因'); self.errors_button.hide(); self.errors_button.clicked.connect(self.show_failures)
-        status_line.addWidget(self.errors_button); layout.addLayout(status_line)
+        self.retry_button = QPushButton('重试失败项'); self.retry_button.hide(); self.retry_button.clicked.connect(self.retry_failed)
+        status_line.addWidget(self.retry_button); status_line.addWidget(self.errors_button); layout.addLayout(status_line)
         footer_card = QWidget(); footer_card.setObjectName('footerCard')
         footer = QHBoxLayout(footer_card); footer.setContentsMargins(12,9,12,9); footer.addWidget(QLabel('导出目录：'))
         self.output_button = QPushButton(); self.output_button.setObjectName('outputPath'); self.output_button.clicked.connect(self.choose_output); self.output_button.setMinimumWidth(240)
@@ -518,6 +526,7 @@ class Window(QMainWindow):
         self.export_all.triggered.connect(lambda: self.export_rows([self.list.item(n).data(Qt.ItemDataRole.UserRole) for n in range(self.list.count()) if not self.list.item(n).isHidden() and exportable(self.list.item(n).data(Qt.ItemDataRole.UserRole))]))
         menu.addAction('选择当前列表中可导出的项', self.select_visible)
         menu.addAction('取消全部勾选', self.clear_checks)
+        self.skip_exported_action = menu.addAction('跳过已导出视频'); self.skip_exported_action.setCheckable(True)
         self.export_selected.setMenu(menu); self.export_selected.clicked.connect(lambda: self.export_rows(self.checked_rows()))
         footer.addWidget(self.export_selected)
         self.export_filtered = QPushButton('导出全部筛选结果'); self.export_filtered.setObjectName('secondaryAction'); self.export_filtered.clicked.connect(self.export_all.trigger); footer.addWidget(self.export_filtered); layout.addWidget(footer_card)
@@ -530,6 +539,9 @@ class Window(QMainWindow):
         self.scan(automatic=True)
 
     def dismiss(self):
+        if self.failed_export_clips:
+            self.failed_export_clips = ()
+            self.retry_button.hide()
         if self.preview_analysis_job is not None and self.preview_analysis_job is self.active_job:
             self.preview_analysis_job.requestInterruption()
         self.close_clip()
@@ -567,7 +579,7 @@ class Window(QMainWindow):
 
     def analyze_clips(self):
         if not self.busy and self.current:
-            if self.recovery.clips: self.close_clip()
+            self.close_clip()
             for clip in self.recovery.clips: self.remove_temporary(clip.path)
             self.recovery.populate([])
             self.recovery.notice.setText('正在查找可独立解码的片段…')
@@ -575,9 +587,7 @@ class Window(QMainWindow):
 
     def save_cached(self):
         if self.busy or not self.current: return
-        row, output = self.current, self.output
-        fmt = ('mp4', 'mkv', 'original')[self.format.currentIndex()]
-        self.task(lambda progress: batch([row], output, fmt, self.timeout, progress), self.exported)
+        self.export_rows([self.current])
 
     def start_inspection(self):
         row = self.current
@@ -619,10 +629,18 @@ class Window(QMainWindow):
         if self.busy or not clips: return
         row, output = self.current, self.output
         held = tuple(clips)
+        self.failed_export_clips = ()
+        self.failed_export_rows = []
+        self.retry_button.hide()
         self.export_held_paths = {clip.path for clip in held}
         self.recovery.setEnabled(False)
         self.list.setEnabled(False)
-        self.task(lambda progress: recovery.export_merged_clips(row, held, output, self.timeout), self.exported)
+        def finished(result):
+            self.exported(result)
+            if result[1] and self.current is row and all(clip in self.recovery.clips for clip in held):
+                self.failed_export_clips = held
+                self.retry_button.show()
+        self.task(lambda progress: recovery.export_merged_clips(row, held, output, self.timeout), finished)
         self.export_hold_job = self.active_job
 
     def preview_cached(self, row):
@@ -884,6 +902,7 @@ class Window(QMainWindow):
         self.export_filtered.setText(f'导出全部筛选结果（{visible_exportable}）')
         self.export_filtered.setEnabled(not self.busy and visible_exportable > 0)
         self.stop_button.setEnabled(self.busy and getattr(self, 'analysis_job', False))
+        self.retry_button.setEnabled(not self.busy)
 
     def select(self, item, previous=None):
         self.dismiss()
@@ -941,13 +960,14 @@ class Window(QMainWindow):
             self.stop_button.setEnabled(False)
             self.status.setText('正在停止分析…')
 
-    def task(self, operation, done, analysis=False, on_clip=None, on_failure=None):
+    def task(self, operation, done, analysis=False, on_clip=None, on_failure=None, on_row=None):
         if self.busy: return
         self.analysis_job = analysis; self.stopping_analysis = False; self.busy = True; self.update_actions(); self.progress.show()
         self.progress.setRange(0,0); self.errors_button.hide()
         job = Job(operation, self); self.active_job = job; self.jobs.append(job)
         job.streaming = on_clip is not None
         if on_clip is not None: job.clip_ready.connect(on_clip)
+        if on_row is not None: job.row_ready.connect(on_row)
         if on_failure is not None: job.failed.connect(lambda message: on_failure())
         job.progress.connect(self.on_progress)
         job.result.connect(done); job.failed.connect(self.show_error)
@@ -1024,43 +1044,82 @@ class Window(QMainWindow):
             self.status.setText(str(exc))
             return
         self.dismiss()
+        self.failed_export_rows = []
+        self.failed_export_clips = ()
+        self.retry_button.hide()
+        previous = self.desktop_owner
+        owner = tempfile.TemporaryDirectory(prefix='desktop-', dir=self.temp.name) if desktop_root else None
+        activated = False
         self.status.setText('正在定位并扫描…' if automatic else '正在扫描…')
         self.scan_has_progress = False
         if self.thumb_job:
             self.thumb_job.requestInterruption(); self.thumb_job = None
         def operation(progress):
             if desktop_root:
-                owner = tempfile.TemporaryDirectory(prefix='desktop-', dir=self.temp.name)
-                try:
-                    rows = desktop_scan.scan(desktop_root, owner.name, passcode, progress=progress, timeout=self.timeout, data_name=data_name, cancelled=QThread.currentThread().isInterruptionRequested)
-                    progress(len(rows), len(rows), '扫描完成')
-                except BaseException:
-                    owner.cleanup()
-                    raise
+                job = QThread.currentThread()
+                rows = desktop_scan.scan(desktop_root, owner.name, passcode, progress=progress, timeout=self.timeout, data_name=data_name, cancelled=job.isInterruptionRequested, on_row=job.row_ready.emit)
+                progress(len(rows), len(rows), '扫描完成')
             else:
-                owner = None
                 rows = core.scan(root, progress=progress, timeout=self.timeout)
             if QThread.currentThread().isInterruptionRequested():
-                if owner: owner.cleanup()
                 raise AnalysisCancelled()
             return root, rows, owner
-        def done(result):
-            self.cache, rows, owner = result
-            previous, self.desktop_owner = self.desktop_owner, owner
-            self.location.setText(str(self.cache))
-            self.scanned(rows)
+        def activate():
+            nonlocal activated
+            if activated: return
+            activated = True
+            self.scanned([])
+            self.desktop_owner = owner
+            self.cache = root
+            self.location.setText(str(root))
             if previous:
                 self.retired_desktop.append(previous)
-                if not self.retirement_pending:
-                    self.retire_desktop_snapshots()
+                if not self.retirement_pending: self.retire_desktop_snapshots()
+        def row_ready(row):
+            if self.closing or self.stopping_analysis: return
+            activate()
+            self.append_scan_row(row)
+        def done(result):
+            _, rows, _ = result
+            if activated and desktop_root:
+                self.rows = rows
+                self.update_filter_counts()
+                self.refresh_exported()
+                self.apply_filter()
+                self.filter_summary()
+            else:
+                activate()
+                self.scanned(rows)
             warnings = getattr(rows, 'warnings', [])
             if warnings:
                 self.last_results = ([], warnings)
                 self.errors_button.setVisible(True)
                 self.status.setText(f'找到 {len(rows)} 项 · {len(warnings)} 项读取失败')
-        self.task(operation, done, analysis=True)
+        self.task(operation, done, analysis=True, on_row=row_ready if desktop_root else None)
         job = self.active_job
+        def discard_unused():
+            if not activated and owner:
+                owner.cleanup()
+        job.finished.connect(discard_unused)
         QTimer.singleShot(10000, lambda: self.directory_wait(job))
+
+    def append_scan_row(self, row):
+        if self.closing or self.stopping_analysis: return
+        self.rows.append(row)
+        item = QListWidgetItem(); item.setData(Qt.ItemDataRole.UserRole, row); item.setSizeHint(QSize(200, 48))
+        widget = MediaRow(row, self.update_actions)
+        widget.thumb.setVisible(self.thumbnails_button.isChecked())
+        self.list.addItem(item); self.list.setItemWidget(item, widget); self.widgets[str(row.path)] = widget
+        widget.setFixedWidth(self.list.viewport().width())
+        if not getattr(self, '_scan_refresh_pending', False):
+            self._scan_refresh_pending = True
+            QTimer.singleShot(150, self.refresh_scan_rows)
+
+    def refresh_scan_rows(self):
+        self._scan_refresh_pending = False
+        if self.closing: return
+        self.refresh_exported()
+        self.apply_filter()
 
     def directory_wait(self, job):
         if self.active_job is job and self.busy and not self.scan_has_progress:
@@ -1072,10 +1131,14 @@ class Window(QMainWindow):
         self.rows = rows; self.images.clear(); self.thumb_attempted.clear()
         self.sort.blockSignals(True); self.sort.setCurrentIndex(0); self.sort.blockSignals(False)
         self.populate(rows)
-        counts = [len(rows), sum(exportable(r) for r in rows), sum(r.status == 'partial' for r in rows), sum(not exportable(r) and r.status != 'partial' for r in rows)]
-        for button, name, count in zip(self.filter_buttons, ('全部','可导出','数据不全','其他'), counts): button.setText(f'{name} {count}')
+        self.update_filter_counts()
         self.apply_filter()
         self.filter_summary()
+
+    def update_filter_counts(self):
+        rows = self.rows
+        counts = [len(rows), sum(exportable(r) for r in rows), sum(r.status == 'partial' for r in rows), sum(not exportable(r) and r.status != 'partial' for r in rows)]
+        for button, name, count in zip(self.filter_buttons, ('全部','可导出','数据不全','其他'), counts): button.setText(f'{name} {count}')
 
     def thumbnail_finished(self):
         if self.closing: self.close()
@@ -1115,10 +1178,29 @@ class Window(QMainWindow):
         if self.busy: return
         if not rows:
             self.status.setText('请先勾选视频，或选择“导出全部筛选结果”'); return
+        if self.skip_exported_action.isChecked():
+            states = exported_states(rows, self.output)
+            rows = [row for row in rows if states.get(str(row.path)) != '已导出']
+            if not rows:
+                self.status.setText('所选视频均已导出'); return
         fmt = ('mp4', 'mkv', 'original')[self.format.currentIndex()]
         output = self.output
+        failed = []
+        self.failed_export_clips = ()
+        self.retry_button.hide()
         self.status.setText('正在导出…')
-        self.task(lambda progress: batch(rows, output, fmt, self.timeout, progress), self.exported)
+        def finished(result):
+            self.failed_export_rows = failed
+            self.exported(result)
+            self.retry_button.setVisible(bool(failed))
+        self.task(lambda progress: batch(rows, output, fmt, self.timeout, progress, failed.append), finished)
+
+    def retry_failed(self):
+        if self.busy: return
+        if self.failed_export_clips:
+            self.save_clips(self.failed_export_clips)
+        elif self.failed_export_rows:
+            self.export_rows(self.failed_export_rows)
 
     def exported(self, result):
         self.last_results = result

@@ -15,6 +15,7 @@ jobs:
       - run: uv run --extra gui pytest -q
   windows:
     runs-on: windows-latest
+    timeout-minutes: 15
     env:
       QT_QPA_PLATFORM: offscreen
     steps:

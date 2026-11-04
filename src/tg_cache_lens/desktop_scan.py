@@ -1,6 +1,6 @@
 """Translate explicitly selected Desktop cache data into media inspection rows."""
 from pathlib import Path
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 
 from . import core
 from .desktop_crypto import key_file, key_names, load_modern_key
@@ -38,7 +38,7 @@ def select_data_name(root, selected=None):
     raise RuntimeError('检测到多组本地密钥；请指定其中一个 key_ 文件')
 
 
-def scan(path, workdir, passcode='', deep=False, timeout=600, progress=lambda *a: None, data_name=None, cancelled=lambda: False):
+def scan(path, workdir, passcode='', deep=False, timeout=600, progress=lambda *a: None, data_name=None, cancelled=lambda: False, on_row=None):
     root = resolve_tdata(path)
     if root is None:
         raise RuntimeError('请选择包含本地密钥的 tdata 目录或 portable 程序目录')
@@ -74,9 +74,10 @@ def scan(path, workdir, passcode='', deep=False, timeout=600, progress=lambda *a
                     snapshot.check()
                     data = read_value(snapshot.directory, entry, key)
                     sample = data[8:] if data.startswith(b'partial:') else data
+                    snapshot.check()
                     if not core.signature_bytes(sample[:16]):
                         return None, None
-                    source, partial = materialize_plain(database, base, key, target, snapshot)
+                    source, partial = materialize_plain(database, base, key, target, snapshot, (data, entry))
                 else:
                     source = materialize(database, base, key, target, snapshot)
                     partial = False
@@ -105,11 +106,35 @@ def scan(path, workdir, passcode='', deep=False, timeout=600, progress=lambda *a
                     Path(str(target) + '.meta').unlink(missing_ok=True)
                 return None, f'{database.name}/{base[0]:016x}-{base[1]:016x}: {exc}'
         progress(0, len(groups), '读取缓存索引')
+        ordered = {}
         with ThreadPoolExecutor(max_workers=4) as pool:
-            for number, (row, warning) in enumerate(pool.map(inspect_group, enumerate(groups)), 1):
-                if row: rows.append(row)
-                if warning: rows.warnings.append(warning)
-                progress(number, len(groups), '读取缓存索引')
+            submit = core.propagate_cancel(inspect_group)
+            pending = {}
+            jobs = iter(enumerate(groups))
+            def fill():
+                while len(pending) < 8:
+                    try: job = next(jobs)
+                    except StopIteration: break
+                    pending[pool.submit(submit, job)] = job[0]
+            fill()
+            completed = 0
+            try:
+                while pending:
+                    if cancelled(): raise core.WorkCancelled()
+                    ready, _ = wait(pending, timeout=.2, return_when=FIRST_COMPLETED)
+                    for future in ready:
+                        index = pending.pop(future)
+                        row, warning = future.result()
+                        if row:
+                            ordered[index] = row
+                            if on_row: on_row(row)
+                        if warning: rows.warnings.append(warning)
+                        completed += 1
+                        progress(completed, len(groups), '读取缓存索引')
+                    fill()
+            finally:
+                for future in pending: future.cancel()
+        rows.extend(ordered[index] for index in sorted(ordered))
         progress(len(groups), len(groups), f'完成 · {len(rows)} 项')
         return rows
     except ValueError as exc:

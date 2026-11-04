@@ -1,5 +1,5 @@
 """Recover independently decodable clips from verified MediaBox ranges."""
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
@@ -327,10 +327,25 @@ def recover(row, directory, timeout=600, progress=lambda *args: None, on_clip=No
                     return None
 
                 with ThreadPoolExecutor(max_workers=3) as pool:
-                    futures = [pool.submit(recover_run, item) for item in enumerate(runs)]
-                    for future in as_completed(futures):
-                        clip = future.result()
-                        if clip: record(clip)
+                    run_with_cancel = core.propagate_cancel(recover_run)
+                    jobs = iter(enumerate(runs))
+                    pending = set()
+                    def fill():
+                        while len(pending) < 6:
+                            try: item = next(jobs)
+                            except StopIteration: break
+                            pending.add(pool.submit(run_with_cancel, item))
+                    fill()
+                    try:
+                        while pending:
+                            progress(0, 0, '分析片段')
+                            ready, pending = wait(pending, timeout=.2, return_when=FIRST_COMPLETED)
+                            for future in ready:
+                                clip = future.result()
+                                if clip: record(clip)
+                            fill()
+                    finally:
+                        for future in pending: future.cancel()
         if core.stamp(row.path) != before:
             raise RuntimeError('缓存已变化，请重新扫描')
         if desktop_source:
