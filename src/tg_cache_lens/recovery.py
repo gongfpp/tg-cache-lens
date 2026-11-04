@@ -28,6 +28,9 @@ class CachedMediaInvalid(RuntimeError):
     """A cached video needs fragment recovery before it can be exported."""
 
 
+MAX_RECOVERY_RUN_SECONDS = 15.0
+
+
 def clip_digest(path):
     digest = sha256()
     with Path(path).open('rb') as source:
@@ -299,6 +302,13 @@ def recover(row, directory, timeout=600, progress=lambda *args: None, on_clip=No
                     if stream != first_video or 'pts_time' not in packet:
                         continue
                     pts = float(packet['pts_time'])
+                    # Long continuous ranges can take minutes to verify as a
+                    # single clip. Split on independently decodable keyframes
+                    # so usable clips arrive progressively.
+                    if (active is not None and 'K' in packet.get('flags', '')
+                            and pts - active[0] >= MAX_RECOVERY_RUN_SECONDS):
+                        active[1] = max(active[0], min(active[1], pts))
+                        active = None
                     if active is None and 'K' in packet.get('flags', ''):
                         active = [pts, pts]
                         runs.append(active)

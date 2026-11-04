@@ -129,6 +129,29 @@ def test_regular_mp4_with_audio_and_b_frames_recovers_cached_segments(tmp_path):
     assert all(core.inspect(clip.path, deep=True).status == 'unknown' for clip in clips)
 
 
+@pytest.mark.parametrize('b_frames', [0, 3])
+def test_long_cached_runs_are_split_on_keyframes_and_remain_exportable(tmp_path, monkeypatch, b_frames):
+    cache = tmp_path/'cache'; cache.mkdir()
+    path = cache/'synthetic.mp4'
+    subprocess.run(['ffmpeg', '-v', 'error', '-f', 'lavfi', '-i', 'testsrc2=size=96x54:rate=12',
+                    '-f', 'lavfi', '-i', 'sine=frequency=440',
+                    '-t', '8', '-c:v', 'libx264', '-threads', '1', '-g', '12', '-keyint_min', '12',
+                    '-sc_threshold', '0', '-bf', str(b_frames), '-c:a', 'aac', '-movflags', '+faststart', str(path)], check=True)
+    packets = recovery.probe(path, 'packet=stream_index,pos,flags', 30)['packets']
+    keys = [int(packet['pos']) for packet in packets if packet['stream_index'] == 0 and 'K' in packet.get('flags', '')]
+    start, end = keys[4:6]
+    data = bytearray(path.read_bytes()); data[start:end] = bytes(end-start); path.write_bytes(data)
+    write_map(path, len(data), [(0, start), (end, len(data)-end)])
+    monkeypatch.setattr(recovery, 'MAX_RECOVERY_RUN_SECONDS', 1.5)
+    row = core.inspect(path)
+    clips = recovery.recover(row, tmp_path)
+    assert len(clips) >= 3
+    assert all(0 < clip.length <= 2.5 for clip in clips)
+    paths, errors = recovery.export_merged_clips(row, clips, tmp_path/'output', 60)
+    assert not errors and len(paths) == 1
+    assert core.inspect(paths[0], deep=True).duration > 4
+
+
 def test_changed_but_decodable_temporary_clip_is_not_exported(tmp_path):
     import shutil
     row = broken_movie(tmp_path/'cache')

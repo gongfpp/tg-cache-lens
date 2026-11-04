@@ -99,7 +99,9 @@ def test_reconstruct_synthetic_verified_ranges(tmp_path, monkeypatch):
     source = materialize(db, (0x10001, 0x10000), key, snapshot)
     assert snapshot.read_bytes() == b'0000ftyp\0\0abc'
     assert read_map(snapshot.with_name(snapshot.name + '.meta').read_bytes(), 13) == (None, 11, True, 13)
-    source.revalidate()
+    with monkeypatch.context() as patch:
+        patch.setattr('tg_cache_lens.desktop_store.decode_slice', lambda *args: pytest.fail('revalidation should not parse or spool unchanged slices'))
+        source.revalidate()
     write_container(version/'20'/'000000000000', key, b'changed')
     with pytest.raises(RuntimeError, match='已变化'):
         source.revalidate()

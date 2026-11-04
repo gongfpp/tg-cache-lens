@@ -627,7 +627,8 @@ def test_fragment_export_keeps_clips_when_filter_changes(window, monkeypatch):
     wait_for(lambda: all(not clip.path.exists() for clip in clips))
 
 
-def test_failed_fragment_merge_can_be_retried(window, monkeypatch):
+@pytest.mark.parametrize('raises', [False, True])
+def test_failed_fragment_merge_can_be_retried(window, monkeypatch, raises):
     from test_recovery import broken_movie
     row = broken_movie(window.cache)
     window.scanned([row]); window.media_filter.setCurrentIndex(2)
@@ -636,6 +637,7 @@ def test_failed_fragment_merge_can_be_retried(window, monkeypatch):
     calls = []
     def export(*args):
         calls.append(args[1])
+        if len(calls) == 1 and raises: raise RuntimeError('synthetic failure')
         return ([], ['synthetic failure']) if len(calls) == 1 else ([window.output/'result.mp4'], [])
     monkeypatch.setattr('tg_cache_lens.gui.recovery.export_merged_clips', export)
     window.save_clips(clips)

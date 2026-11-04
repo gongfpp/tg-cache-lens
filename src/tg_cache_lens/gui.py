@@ -627,6 +627,7 @@ class Window(QMainWindow):
 
     def save_clips(self, clips):
         if self.busy or not clips: return
+        self.close_clip()
         row, output = self.current, self.output
         held = tuple(clips)
         self.failed_export_clips = ()
@@ -640,7 +641,12 @@ class Window(QMainWindow):
             if result[1] and self.current is row and all(clip in self.recovery.clips for clip in held):
                 self.failed_export_clips = held
                 self.retry_button.show()
-        self.task(lambda progress: recovery.export_merged_clips(row, held, output, self.timeout), finished)
+        def failed():
+            if self.current is row and all(clip in self.recovery.clips for clip in held):
+                self.failed_export_clips = held
+                self.retry_button.show()
+        self.task(lambda progress: recovery.export_merged_clips(row, held, output, self.timeout), finished,
+                  on_failure=failed)
         self.export_hold_job = self.active_job
 
     def preview_cached(self, row):

@@ -64,6 +64,12 @@ def scan(path, workdir, passcode='', deep=False, timeout=600, progress=lambda *a
                 groups.extend((database, base, snapshot, None) for base in snapshot.groups)
             else:
                 groups.extend((database, entry_key, snapshot, entry) for entry_key, entry in snapshot.entries.items())
+        # Media-cache groups are overwhelmingly more likely to be videos than
+        # small cache entries such as images and stickers. Start with the
+        # smaller video groups so a large ordinary cache cannot delay the list.
+        groups.sort(key=lambda group: (group[0].name != 'media_cache',
+                    sum(entry.size for entry in group[2].groups[group[1]].values())
+                    if group[3] is None else group[3].size))
         def inspect_group(job):
             if cancelled(): return None, None
             number, (database, base, snapshot, entry) = job

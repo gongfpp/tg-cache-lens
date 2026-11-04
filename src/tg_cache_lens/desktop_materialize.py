@@ -32,9 +32,11 @@ class DocumentSource:
 
     def revalidate(self):
         snapshot = read_index_snapshot(self.database, self.local_key)
-        with document_spool(snapshot, self.base_key) as spool:
-            _, _, ambiguous, unavailable, identity = read_document(self.database, self.base_key, self.local_key, snapshot, spool)
-        if identity != self.content_hash or ambiguous != self.ambiguous or unavailable != self.unavailable:
+        _, _, _, _, identity = read_document(self.database, self.base_key, self.local_key, snapshot, identity_only=True)
+        # The identity includes every index entry, its availability and the
+        # content hash of every readable slice. Identical bytes necessarily
+        # produce the same parsed ranges and conflict decisions.
+        if identity != self.content_hash:
             raise RuntimeError('Desktop 缓存内容已变化，请重新扫描')
 
 

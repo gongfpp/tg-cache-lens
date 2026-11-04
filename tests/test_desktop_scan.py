@@ -338,8 +338,15 @@ def test_small_cache_and_corrupt_entry_do_not_hide_other_videos(cache, tmp_path,
         return original_read(directory, entry, key)
     monkeypatch.setattr(desktop_scan, 'read_value', counted_read)
     monkeypatch.setattr(desktop_store, 'read_value', counted_read)
+    submitted = []
+    original_submit = desktop_scan.ThreadPoolExecutor.submit
+    def counted_submit(pool, function, job):
+        submitted.append(job[1][0].name)
+        return original_submit(pool, function, job)
+    monkeypatch.setattr(desktop_scan.ThreadPoolExecutor, 'submit', counted_submit)
     rows = scan(root, workdir)
     assert reads.count((0x101, 1)) == 1
+    assert submitted[0] == 'media_cache'
     assert sorted(row.status for row in rows) == ['partial', 'unknown']
     assert len(rows.warnings) == 1 and '校验' in rows.warnings[0]
     plain = next(row for row in rows if row.status == 'partial')

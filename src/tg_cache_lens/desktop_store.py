@@ -133,7 +133,7 @@ def read_plain(database, entry_key, key, snapshot=None):
     return value, entry
 
 
-def read_document(database, base_key, key, snapshot=None, spool=None):
+def read_document(database, base_key, key, snapshot=None, spool=None, identity_only=False):
     """Read a consistent indexed document's verified parts and ranges.
 
     The returned ranges describe only cached bytes, not original file length.
@@ -184,6 +184,8 @@ def read_document(database, base_key, key, snapshot=None, spool=None):
             continue
         identity.update(b'valid')
         identity.update(sha256(value).digest())
+        if identity_only:
+            continue
         try:
             add_parts(number, decode_slice(value, number))
         except AmbiguousSlice:
@@ -203,6 +205,11 @@ def read_document(database, base_key, key, snapshot=None, spool=None):
                 except ValueError:
                     pass
             unavailable.append(number)
+    if identity_only:
+        snapshot.check()
+        if [optional_stamp(path) for path in paths] != stamps:
+            raise CacheChanged('视频缓存索引已变化，请重新扫描')
+        return [], [], (), (), identity.digest()
     # Exclude conflicting overlap from every source, while retaining ranges
     # outside it. The cache alone cannot establish which copy is correct.
     parts.sort(key=lambda item: item[1].offset)

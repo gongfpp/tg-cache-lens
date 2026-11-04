@@ -12,14 +12,14 @@ Cache Lens 是一个开源桌面工具，支持 Windows 上的官方 Telegram De
 
 - 浏览、搜索视频缓存，按时长、缓存大小、覆盖率、缓存时间和状态排序或筛选。Desktop 扫描过程中会逐步显示已识别的视频。
 - 在窗口中预览，单个或批量导出 MP4、MKV 或原格式；当前导出目录中已有的结果会在列表中标记。
-- 对可分析的缺片视频逐步显示可播放片段，在右侧预览并合并导出所选片段。
+- 对可分析的缺片视频逐步显示可播放片段；较长的缓存区间会按关键帧拆分，支持在右侧预览并合并导出所选片段。
 - 记住上次选择的缓存目录与导出目录；支持重新扫描、停止分析、跳过已导出视频以及重试失败项。
 
 缓存中不存在的数据无法恢复。并非所有缓存格式或损坏视频都能解析；Desktop 连续缓存可导出，但它的已知范围不一定能证明原视频的完整长度。
 
 ## Windows 快速开始
 
-1. 从 [Releases](https://github.com/gongfpp/tg-cache-lens/releases) 下载 `tg-cache-lens-0.5.1-windows-x64.zip`，解压整个文件夹，双击 `Cache Lens.exe`。
+1. 从 [Releases](https://github.com/gongfpp/tg-cache-lens/releases) 下载 `tg-cache-lens-0.5.2-windows-x64.zip`，解压整个文件夹，双击 `Cache Lens.exe`。
 2. 安装 [FFmpeg](https://ffmpeg.org/download.html)，确保 `ffmpeg` 和 `ffprobe` 可以从 PATH 运行；程序也会查找当前用户的 WinGet Links 目录。
 3. 点击“选择目录”，选择 Telegram Desktop portable 程序目录或 `tdata`，选择后开始扫描。“筛选”菜单中也可使用自动扫描；多个候选目录时请手动选择。
 4. 选择导出目录，点击视频预览或勾选后导出。缺片视频可分析片段，再选择片段合并导出。
