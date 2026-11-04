@@ -46,16 +46,58 @@ class Media:
 
     @property
     def key(self):
+        source = getattr(self, 'desktop_source', None)
+        if source:
+            return '-'.join(f'{part:016x}' for part in source.base_key)
         return re.sub(r"(_partial|\.(mp4|mkv|webm|mov))$", "", self.path.name)
+
+    @property
+    def source_path(self):
+        source = getattr(self, 'desktop_source', None)
+        return source.database if source else self.path
+
+    @property
+    def source_modified_ns(self):
+        source = getattr(self, 'desktop_source', None)
+        return (source.cache_time * 1_000_000_000 if source.cache_time else None) if source else self.fingerprint[3]
 
     @property
     def coverage(self):
         return f"{min(100, 100*self.cached/self.total):.1f}%" if self.total and self.cached is not None else "—"
 
 def default_root():
+    if os.name == 'nt':
+        return Path(os.environ.get('APPDATA', str(Path.home()))) / 'Telegram Desktop' / 'tdata'
     return Path.home() / "Library/Group Containers/6N38VWS5BX.ru.keepcoder.Telegram"
 
+
+def running_telegram_dirs():
+    """Find candidate portable directories from running Telegram processes."""
+    import psutil
+    paths = set()
+    for process in psutil.process_iter(['name']):
+        try:
+            if (process.info.get('name') or '').casefold() != 'telegram.exe':
+                continue
+            executable = process.exe()
+            if executable:
+                paths.add(Path(executable).parent / 'tdata')
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, OSError):
+            continue
+    return paths
+
+
 def auto_root():
+    if os.name == 'nt' and sys.platform != 'darwin':
+        from .desktop_scan import resolve_tdata
+        candidates = {path.resolve() for path in running_telegram_dirs() if resolve_tdata(path)}
+        if len(candidates) == 1:
+            return candidates.pop()
+        if len(candidates) > 1:
+            raise RuntimeError('检测到多个正在运行的 Telegram 缓存目录；请手动选择')
+        root = default_root()
+        if resolve_tdata(root): return root
+        raise RuntimeError('未找到标准安装目录；portable 版请手动选择程序目录或 tdata')
     if sys.platform != "darwin":
         raise RuntimeError("自动定位支持 macOS 原生 Telegram；其他来源请手动选择兼容的 MediaBox 目录")
     root = default_root()
@@ -73,26 +115,38 @@ def default_output():
 def binary(name):
     path = shutil.which(name)
     if not path:
-        for root in ("/opt/homebrew/bin", "/usr/local/bin"):
-            if (Path(root)/name).is_file(): return str(Path(root)/name)
-        raise RuntimeError(f"找不到 {name}。请先运行 brew install ffmpeg")
+        if os.name == 'nt':
+            local = os.environ.get('LOCALAPPDATA')
+            if local:
+                candidate = Path(local) / 'Microsoft' / 'WinGet' / 'Links' / (name + '.exe')
+                if candidate.is_file(): return str(candidate)
+        else:
+            for root in ("/opt/homebrew/bin", "/usr/local/bin"):
+                if (Path(root)/name).is_file(): return str(Path(root)/name)
+        hint = "请安装 FFmpeg 并将 ffmpeg 和 ffprobe 加入 PATH" if os.name == "nt" else "请先安装 FFmpeg（macOS 可运行 brew install ffmpeg）"
+        raise RuntimeError(f"找不到 {name}。{hint}")
     return path
 
 def run(command, timeout=30):
     try:
-        p = subprocess.run(command, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=timeout)
+        p = subprocess.run(command, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=timeout,
+                           creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
     except subprocess.TimeoutExpired as e:
         raise RuntimeError("处理超时；可通过 --timeout 增加时限") from e
     if p.returncode:
         raise RuntimeError(p.stderr.strip()[-700:] or "媒体工具处理失败")
     return p.stdout, p.stderr
 
+def signature_bytes(b):
+    if b[4:8] == b"ftyp": return "mp4"
+    if b[:4] == b"\x1aE\xdf\xa3": return "mkv"
+    if b[:4] == b"RIFF" and b[8:12] == b"AVI ": return "avi"
+    return None
+
 def signature(path):
     try:
         with path.open("rb") as f: b = f.read(16)
-        if b[4:8] == b"ftyp": return "mp4"
-        if b[:4] == b"\x1aE\xdf\xa3": return "mkv"
-        if b[:4] == b"RIFF" and b[8:12] == b"AVI ": return "avi"
+        return signature_bytes(b)
     except OSError:
         pass
     return None
@@ -159,7 +213,8 @@ def inspect(path, kind=None, deep=False, timeout=600):
         if item.status != "partial":
             if deep:
                 _, errors = run([binary("ffmpeg"), "-nostdin", "-v", "error", "-xerror", "-err_detect", "explode",
-                    "-threads", "2", "-i", str(path), "-map", "0:v", "-map", "0:a?", "-f", "null", "-"], timeout)
+                    "-threads", "2", "-i", str(path), "-map", "0:v", "-map", "0:a?",
+                    "-fps_mode:v", "passthrough", "-enc_time_base:v", "1:1000000", "-f", "null", "-"], timeout)
                 if errors.strip(): raise RuntimeError(errors[-700:])
                 item.status = "ready" if verified_map else "unknown"
                 item.detail = "完整范围已确认，音视频全程解码通过" if verified_map else "现有内容解码通过，但缺少原始完整长度依据"
@@ -173,10 +228,23 @@ def inspect(path, kind=None, deep=False, timeout=600):
         item.status, item.detail = "invalid", "缓存正在变化，请稍后重新扫描"
     return item
 
-def scan(root, deep=False, progress=lambda *a: None, timeout=600):
+def scan(root, deep=False, progress=lambda *a: None, timeout=600, passcode=''):
     root = Path(root).expanduser()
-    if not root.is_dir(): raise RuntimeError("缓存目录不存在；请用 --cache 指定 media 文件夹")
+    if not root.is_dir() and not root.is_file(): raise RuntimeError("缓存目录不存在；请用 --cache 指定缓存位置")
     binary("ffmpeg"); binary("ffprobe")
+    from . import desktop_scan
+    if desktop_scan.resolve_tdata(root):
+        import tempfile
+        owner = tempfile.TemporaryDirectory(prefix='cache-lens-desktop-')
+        try:
+            result = desktop_scan.scan(root, owner.name, passcode, deep, timeout, progress)
+        except BaseException:
+            owner.cleanup()
+            raise
+        for row in result:
+            row._desktop_owner = owner
+        return result
+    if not root.is_dir(): raise RuntimeError("请选择支持的缓存目录或 Desktop 密钥文件")
     dirs = [root] if root.name == "media" else media_dirs(root)
     if not dirs:
         # Explicit flat fixture or custom cache directory.
@@ -210,12 +278,25 @@ def scan(root, deep=False, progress=lambda *a: None, timeout=600):
     progress(len(candidates), len(candidates), f"完成 · {len(result)} 项，合并 {len(rows)-len(result)} 份重复缓存")
     return result
 
+
+def publish_temp(temp, target):
+    """Atomically publish without replacing an existing file."""
+    if os.name == 'nt':
+        # Windows rename refuses an existing destination and works on filesystems
+        # such as exFAT that do not support hard links.
+        os.rename(temp, target)
+    else:
+        os.link(temp, target)
+
+
 def export(item, output, fmt="mp4", timeout=600):
     if fmt not in ("mp4", "mkv", "original"): raise ValueError("不支持的导出格式")
     # Always recheck: a prior report is not authority to export changed bytes.
     fresh = inspect(item.path, deep=True, timeout=timeout)
     if not fresh or fresh.status != "ready": raise RuntimeError("此文件未确认完整，已停止导出。请重新扫描。")
     output = Path(output).expanduser()
+    if output.resolve().is_relative_to(fresh.path.parent.resolve()):
+        raise RuntimeError("请选择缓存目录以外的导出位置")
     output.mkdir(parents=True, exist_ok=True)
     ext = fresh.kind if fmt == "original" else fmt
     base = re.sub(r"[^\w.-]", "_", fresh.key)
@@ -242,19 +323,26 @@ def export(item, output, fmt="mp4", timeout=600):
         checked = inspect(temp, deep=True, timeout=timeout)
         if not checked or checked.status == "invalid": raise RuntimeError("输出文件未通过解码检查")
         if stamp(fresh.path) != fresh.fingerprint: raise RuntimeError("导出期间缓存发生变化，请重新扫描")
-        # Hard link is atomic and refuses to overwrite an existing destination.
-        os.link(temp, target)
+        while True:
+            try:
+                publish_temp(temp, target)
+                break
+            except FileExistsError:
+                target = output / f"{base}-{n}.{ext}"
+                n += 1
         item.status, item.detail = fresh.status, fresh.detail
         item.fingerprint = fresh.fingerprint
         return target
     finally:
         temp.unlink(missing_ok=True)
 
-def preview(item, output, timeout=600):
-    target = export(item, output, "mp4", timeout)
-    # Use the user's default player. Keep its input until the app exits.
-    import sys
+def open_path(target):
     if sys.platform == "darwin": subprocess.run(["open", str(target)], check=True)
     elif os.name == "nt": os.startfile(str(target))
     else: subprocess.Popen(["xdg-open", str(target)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+def preview(item, output, timeout=600):
+    target = export(item, output, "mp4", timeout)
+    # Use the user's default player. Keep its input until the app exits.
+    open_path(target)
     return target

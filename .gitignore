@@ -14,3 +14,5 @@ report.*
 *.webm
 *.meta
 .env*
+cache-lens-gui-*/
+pytest-of-*/

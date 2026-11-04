@@ -19,10 +19,12 @@ def app():
 @pytest.fixture
 def window(cache, tmp_path, app):
     w = Window(cache, tmp_path/'exports')
+    w.thumbnails_button.setChecked(False)
     w.show()
     yield w
     wait_for(lambda: not any(j.isRunning() for j in w.jobs))
     w.close()
+    wait_for(lambda: not w.isVisible())
     app.processEvents()
 
 
@@ -43,6 +45,110 @@ def click_row(window, index=0):
     window.list.scrollToItem(item)
     QTest.mouseClick(window.list.viewport(), Qt.MouseButton.LeftButton,
                     pos=window.list.visualItemRect(item).center())
+
+
+def test_export_markers_follow_selected_directory_and_actual_files(window, tmp_path, monkeypatch):
+    from dataclasses import replace
+    from PySide6.QtWidgets import QFileDialog
+    row = next(item for item in core.scan(window.cache) if item.status == 'covered')
+    other = replace(row, path=row.path.with_name(row.key + '-2'))
+    first = tmp_path / 'first'; first.mkdir()
+    second = tmp_path / 'second'; second.mkdir()
+    (first / f'{row.key}-partial-0.000s-5.000s.mp4').touch()
+    (first / f'{other.key}.mp4').touch()
+    window.output = first
+    window.scanned([row, other])
+    assert window.widgets[str(row.path)].exported_badge.text() == '已导出片段'
+    assert window.widgets[str(other.path)].exported_badge.text() == '已导出'
+    monkeypatch.setattr(QFileDialog, 'getExistingDirectory', lambda *args: str(second))
+    monkeypatch.setattr(window, 'save_directory', lambda *args: None)
+    window.choose_output()
+    assert not window.widgets[str(row.path)].exported_badge.text()
+    (second / f'{row.key}-cached-unknown-2.mp4').touch()
+    window.exported(([second / f'{row.key}-cached-unknown-2.mp4'], []))
+    assert window.widgets[str(row.path)].exported_badge.text() == '已导出'
+    (second / f'{row.key}-cached-unknown-2.mp4').unlink()
+    window.refresh_exported()
+    assert not window.widgets[str(row.path)].exported_badge.text()
+
+
+def test_output_directory_is_restored_after_restart(cache, tmp_path, app, monkeypatch):
+    from PySide6.QtCore import QSettings
+    from PySide6.QtWidgets import QFileDialog
+    import tg_cache_lens.gui as gui
+    settings_path = tmp_path / 'settings.ini'
+    monkeypatch.setattr(gui, 'QSettings', lambda *args: QSettings(str(settings_path), QSettings.Format.IniFormat))
+    # The constructor also references the enum values on QSettings.
+    monkeypatch.setattr(gui.QSettings, 'Format', QSettings.Format, raising=False)
+    monkeypatch.setattr(gui.QSettings, 'Status', QSettings.Status, raising=False)
+    selected = tmp_path / 'selected'; selected.mkdir()
+    monkeypatch.setattr(QFileDialog, 'getExistingDirectory', lambda *args: str(selected))
+    first = Window(cache, tmp_path / 'original')
+    first.choose_output()
+    first.close()
+    second = Window(cache)
+    assert second.output == selected
+    second.close()
+
+
+def test_preview_cleanup_retries_a_temporarily_locked_file(window, monkeypatch):
+    target = Path(window.temp.name)/'preview.mp4'
+    target.write_bytes(b'synthetic')
+    window.preview_path = target
+    original = Path.unlink
+    attempts = []
+    def unlink(path, *args, **kwargs):
+        if path == target and not attempts:
+            attempts.append(path)
+            raise PermissionError('synthetic sharing violation')
+        return original(path, *args, **kwargs)
+    monkeypatch.setattr(Path, 'unlink', unlink)
+    window.clear_preview()
+    assert window.preview_path is None
+    wait_for(lambda: not target.exists())
+    assert attempts == [target]
+
+
+def test_open_output_does_not_create_directories_inside_cache(window, monkeypatch):
+    opened = []
+    monkeypatch.setattr('tg_cache_lens.gui.QDesktopServices.openUrl', lambda url: opened.append(url))
+    target = window.cache/'new-output'
+    window.output = target
+    click(window.open_output)
+    assert not target.exists() and not opened
+    assert '缓存目录以外' in window.status.text()
+
+
+def test_list_columns_fit_with_preview_open_at_minimum_size(window):
+    from PySide6.QtCore import QPoint
+    window.scan(); wait_for(lambda: not window.busy)
+    window.resize(900, 640)
+    window.inspector.show()
+    window.preview_panel.show()
+    window.splitter.setSizes([420, 660])
+    QApplication.processEvents()
+    for row in window.widgets.values():
+        assert row.state.mapTo(row, QPoint(row.state.width(), 0)).x() <= row.width()
+        assert row.state.fontMetrics().horizontalAdvance(row.state.text()) <= row.state.width()
+        assert row.cached_amount.fontMetrics().horizontalAdvance(row.cached_amount.text()) <= row.cached_amount.width()
+
+
+def test_column_header_toggles_sort_direction(window):
+    from dataclasses import replace
+    row = next(item for item in core.scan(window.cache) if item.status == 'covered')
+    first = replace(row, path=row.path.with_name('first'), cached=100)
+    second = replace(row, path=row.path.with_name('second'), cached=200)
+    window.scanned([first, second])
+    button = window.column_buttons[1][0]
+    click(button)
+    assert window.list.item(0).data(Qt.ItemDataRole.UserRole).path == second.path
+    click(button)
+    assert window.list.item(0).data(Qt.ItemDataRole.UserRole).path == first.path
+    first = replace(first, total=1000, cached=100)
+    second = replace(second, total=1000, cached=200)
+    window.scanned([first, second])
+    click(window.column_buttons[6][0])
+    assert window.list.item(0).data(Qt.ItemDataRole.UserRole).path == second.path
 
 
 def test_gui_selection_filter_export(window):
@@ -215,7 +321,7 @@ def test_auto_rescan_closes_preview_and_rejects_old_thumbnail(window, monkeypatc
     monkeypatch.setattr(core, 'auto_root', lambda: window.cache)
     click(window.scan_button)
     assert window.preview_panel.isHidden() and window.player.source().isEmpty()
-    assert not previous_preview.exists()
+    wait_for(lambda: not previous_preview.exists())
     window.thumbnail(object(), 'old-scan', QImage())
     assert 'old-scan' not in window.images
     wait_for(lambda: not window.busy)
@@ -255,9 +361,10 @@ def test_rescan_resets_thumbnails_and_click_opens_partial_details(window):
     wait_for(lambda: window.thumb_job is None)
     assert window.images and window.thumbnails_button.text() == '隐藏缩略图'
     window.scan(); wait_for(lambda: not window.busy)
-    assert not window.thumbnails_button.isChecked() and not window.images
+    assert window.thumbnails_button.isChecked()
     assert window.current is None and window.preview_panel.isHidden()
-    assert all(widget.thumb.isHidden() for widget in window.widgets.values())
+    wait_for(lambda: window.thumb_job is None)
+    assert all(not widget.thumb.isHidden() for widget in window.widgets.values())
     partial = next(n for n in range(window.list.count())
                    if window.list.item(n).data(Qt.ItemDataRole.UserRole).status == 'partial')
     click_row(window, partial)
@@ -359,3 +466,138 @@ def test_select_all_and_invert_preserve_hidden_checks(window):
     window.invert_visible()
     assert [r.path for r in window.checked_rows()]==[row.path]
     assert '含隐藏 1 项' in window.selection.text()
+
+
+def test_rescan_uses_selected_directory(window, monkeypatch):
+    calls = []
+    def fake_scan(root, progress, timeout):
+        calls.append(Path(root))
+        progress(0, 0, '扫描')
+        return []
+    monkeypatch.setattr(core, 'scan', fake_scan)
+    click(window.rescan_button)
+    wait_for(lambda: not window.busy)
+    assert calls == [window.cache]
+    assert window.min_size.isVisible() and window.max_duration.isVisible()
+
+
+def test_stop_analysis_preserves_previous_results(window):
+    import threading
+    started = threading.Event()
+    completed = []
+    previous = list(window.rows)
+    def work(progress):
+        started.set()
+        while True:
+            time.sleep(.01)
+            progress(0, 1, '分析片段')
+    window.task(work, completed.append, analysis=True)
+    wait_for(started.is_set)
+    assert window.stop_button.isEnabled()
+    click(window.stop_button)
+    wait_for(lambda: not window.busy)
+    assert not completed and window.rows == previous
+    assert '已停止' in window.status.text()
+    assert not window.stop_button.isEnabled()
+
+
+def test_recovery_panel_keeps_player_and_fragment_tabs_visible(window):
+    from test_recovery import broken_movie
+    row = broken_movie(window.cache)
+    window.scanned([row])
+    window.media_filter.setCurrentIndex(2)
+    click_row(window)
+    wait_for(lambda: not window.busy)
+    assert window.inspector.currentWidget() is window.recovery
+    assert window.recovery.player_area.isVisible()
+    assert window.recovery.tabs.tabText(0).startswith('缓存片段')
+    assert window.recovery.tabs.tabText(1) == '合并信息'
+    assert window.recovery.table.columnCount() == 5
+    assert not window.clip_pause.isEnabled()
+    if window.recovery.clips:
+        window.watch_clip(window.recovery.clips[0])
+        assert window.clip_pause.isEnabled()
+        window.close_clip()
+        assert not window.clip_pause.isEnabled()
+
+
+def test_partial_preview_arrives_before_analysis_finishes(window, monkeypatch):
+    import threading
+    from test_recovery import broken_movie
+    from tg_cache_lens import recovery
+    row = broken_movie(window.cache)
+    window.scanned([row]); window.media_filter.setCurrentIndex(2)
+    blocked = threading.Event(); release = threading.Event()
+    checked = recovery.checked_clip
+    calls = []
+    def delayed(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 2:
+            blocked.set()
+            if not release.wait(15): raise RuntimeError('synthetic timeout')
+        return checked(*args, **kwargs)
+    monkeypatch.setattr(recovery, 'checked_clip', delayed)
+    click_row(window)
+    try:
+        wait_for(lambda: blocked.is_set() and len(window.recovery.clips) == 1)
+        assert window.busy and window.progress.isVisible()
+        assert window.recovery.watch.isEnabled()
+        assert not window.recovery.save.isEnabled()
+    finally:
+        release.set()
+    wait_for(lambda: not window.busy)
+    assert len(window.recovery.clips) == 2
+    assert not window.progress.isVisible() and window.recovery.save.isEnabled()
+
+
+def test_stop_keeps_already_discovered_clips(window, monkeypatch):
+    import threading
+    from test_recovery import broken_movie
+    from tg_cache_lens import recovery
+    row = broken_movie(window.cache)
+    window.scanned([row]); window.media_filter.setCurrentIndex(2)
+    blocked, release = threading.Event(), threading.Event()
+    checked = recovery.checked_clip
+    calls = []
+    def delayed(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 2:
+            blocked.set()
+            if not release.wait(15): raise RuntimeError('synthetic timeout')
+        return checked(*args, **kwargs)
+    monkeypatch.setattr(recovery, 'checked_clip', delayed)
+    click_row(window)
+    try:
+        wait_for(lambda: blocked.is_set() and len(window.recovery.clips) == 1)
+        click(window.stop_button)
+    finally:
+        release.set()
+    wait_for(lambda: not window.busy)
+    assert len(window.recovery.clips) == 1 and window.recovery.clips[0].path.exists()
+    assert not window.progress.isVisible() and window.recovery.save.isEnabled()
+
+
+def test_fragment_export_keeps_clips_when_filter_changes(window, monkeypatch):
+    import threading
+    from test_recovery import broken_movie
+    from tg_cache_lens import recovery
+    row = broken_movie(window.cache)
+    window.scanned([row]); window.media_filter.setCurrentIndex(2)
+    click_row(window); wait_for(lambda: not window.busy)
+    clips = list(window.recovery.clips)
+    started, release = threading.Event(), threading.Event()
+    def export(*args):
+        started.set()
+        if not release.wait(15): raise RuntimeError('synthetic timeout')
+        assert all(clip.path.exists() for clip in clips)
+        return [], []
+    monkeypatch.setattr(recovery, 'export_merged_clips', export)
+    window.save_clips(clips)
+    try:
+        wait_for(started.is_set)
+        window.search.setText('no matching video')
+        assert all(clip.path.exists() for clip in clips)
+    finally:
+        release.set()
+    wait_for(lambda: not window.busy)
+    wait_for(lambda: all(not clip.path.exists() for clip in clips))

@@ -3,10 +3,24 @@ from tg_cache_lens.__main__ import main
 from tg_cache_lens import cli
 
 
+def test_gui_receives_unspecified_directories_for_settings_restore(monkeypatch):
+    calls = []
+    monkeypatch.setattr('tg_cache_lens.__main__.launch_gui', lambda *args: calls.append(args) or 0)
+    assert main(['gui']) == 0
+    assert calls == [(None, None, 600)]
+
+
 def test_json_compatibility(cache, capsys):
     assert main(['--cache', str(cache), '--scan', '--deep']) == 0
     rows = json.loads(capsys.readouterr().out)
     assert {r['status'] for r in rows} == {'ready', 'partial', 'unknown'}
+
+
+def test_scan_without_cache_uses_auto_root(cache, capsys, monkeypatch):
+    from tg_cache_lens import core
+    monkeypatch.setattr(core, 'auto_root', lambda: cache)
+    assert main(['--scan']) == 0
+    assert len(json.loads(capsys.readouterr().out)) == 3
 
 
 def test_script_export_and_rejection(cache, tmp_path, capsys):
