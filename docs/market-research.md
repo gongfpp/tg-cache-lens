@@ -2,6 +2,20 @@
 
 调研日期：2026-11-04。以下按公开页面描述比较，没有对其他项目进行独立功能测试；不能据此判断实际成功率或性能。
 
+## 有一定规模的相关项目
+
+以下 Star / Fork 数于 2026-11-04 从 GitHub API 查询，会随时间变化。它们以在线下载为主，适合参考产品和传播方式，不应被当成与本项目完全相同的本地缓存恢复工具。
+
+| 项目 | Star / Fork | 公开定位及值得参考之处 |
+|---|---:|---|
+| [tdl](https://github.com/iyear/tdl) | 8,240 / 833 | Telegram 命令行工具箱，提供下载、上传、转发和导出；首页有中英文入口、功能列表、预览和独立文档。 |
+| [Telegram-Media-Downloader](https://github.com/Neet-Nestor/Telegram-Media-Downloader) | 6,391 / 636 | Telegram Web 的用户脚本；通过 GitHub 和 Greasy Fork 提供安装入口。 |
+| [tangyoha/telegram_media_downloader](https://github.com/tangyoha/telegram_media_downloader) | 5,643 / 657 | 下载 Telegram 会话中的媒体，提供 Web 状态界面和 Bot 工作流；首页有中英文文档、反馈入口和 Telegram 社区链接。 |
+| [Dineshkarthik/telegram_media_downloader](https://github.com/Dineshkarthik/telegram_media_downloader) | 2,759 / 402 | 基于 Telegram 会话下载媒体，提供 Web UI；使用上次读取记录避免重复下载。 |
+| [telegram-desktop-decrypt](https://github.com/atilaromero/telegram-desktop-decrypt) | 220 / 66 | 直接解密 Desktop `tdata`，可输出包括视频在内的缓存文件；仓库已归档，最后推送为 2021 年，不能假定兼容当前 Desktop。 |
+
+GitHub 展示的是项目本身的包装和入口，并不能证明各渠道分别带来多少用户。tgplay 在本次查询时为 0 Star / 0 Fork，只适合说明其公开的 Reddit 发帖方式，不适合用作热门项目代表。
+
 | 项目 | 定位和公开展示 | 与 Cache Lens 的关系 |
 |---|---|---|
 | [Telegram Media Recovery](https://github.com/Alirezatz/TelegramMediaRecovery) | 最直接的同类：Windows WPF 界面和 CLI，从 Desktop `tdata` 恢复多类媒体；README 突出本机只读、媒体类型、覆盖率筛选、HTML 清单和处理技术。 | 它侧重多格式批量恢复和清单；Cache Lens 更聚焦视频列表、内嵌预览和选择片段合并。前者对部分流式文件描述为填零输出，不能据此断言两者的可播放率高低。 |
