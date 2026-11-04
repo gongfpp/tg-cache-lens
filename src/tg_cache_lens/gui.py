@@ -1124,8 +1124,12 @@ class Window(QMainWindow):
     def refresh_scan_rows(self):
         self._scan_refresh_pending = False
         if self.closing: return
+        status = self.status.text()
         self.refresh_exported()
         self.apply_filter()
+        # A delayed batch can arrive after a scan failed or was stopped;
+        # filtering must not replace that outcome with the item count.
+        if not self.busy: self.status.setText(status)
 
     def directory_wait(self, job):
         if self.active_job is job and self.busy and not self.scan_has_progress:
@@ -1189,6 +1193,11 @@ class Window(QMainWindow):
             rows = [row for row in rows if states.get(str(row.path)) != '已导出']
             if not rows:
                 self.status.setText('所选视频均已导出'); return
+        self.close_clip()
+        if self.preview_path:
+            self.clear_preview()
+            self.stack.setCurrentWidget(self.poster)
+            self.set_poster()
         fmt = ('mp4', 'mkv', 'original')[self.format.currentIndex()]
         output = self.output
         failed = []

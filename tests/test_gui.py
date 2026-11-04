@@ -133,6 +133,12 @@ def test_preview_cleanup_retries_a_temporarily_locked_file(window, monkeypatch):
     assert attempts == [target]
 
 
+def test_delayed_scan_refresh_keeps_error_status(window):
+    window.status.setText('找不到 ffmpeg')
+    window.refresh_scan_rows()
+    assert window.status.text() == '找不到 ffmpeg'
+
+
 def test_open_output_does_not_create_directories_inside_cache(window, monkeypatch):
     opened = []
     monkeypatch.setattr('tg_cache_lens.gui.QDesktopServices.openUrl', lambda url: opened.append(url))
