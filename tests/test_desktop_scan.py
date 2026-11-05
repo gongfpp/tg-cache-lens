@@ -206,7 +206,7 @@ def test_gui_rescan_releases_old_snapshots_and_keeps_current_on_failure(cache, t
         window.scan()
         wait_for(lambda: not window.busy and 'synthetic scan failure' in window.status.text())
         assert current.exists()
-        assert len(list(Path(window.temp.name).glob('desktop-*'))) == 1
+        wait_for(lambda: len(list(Path(window.temp.name).glob('desktop-*'))) == 1)
     finally:
         window.close()
 
