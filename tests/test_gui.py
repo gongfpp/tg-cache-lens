@@ -630,7 +630,9 @@ def test_fragment_export_keeps_clips_when_filter_changes(window, monkeypatch):
     finally:
         release.set()
     wait_for(lambda: not window.busy)
-    wait_for(lambda: all(not clip.path.exists() for clip in clips))
+    # Completed analysis remains available for the current session even if
+    # changing the filter closes the preview during export.
+    assert all(clip.path.exists() for clip in clips)
 
 
 @pytest.mark.parametrize('raises', [False, True])
@@ -652,3 +654,20 @@ def test_failed_fragment_merge_can_be_retried(window, monkeypatch, raises):
     click(window.retry_button)
     wait_for(lambda: not window.busy)
     assert len(calls) == 2 and not window.retry_button.isVisible()
+
+
+def test_switching_back_reuses_completed_fragment_analysis(window):
+    from test_recovery import broken_movie
+    first = broken_movie(window.cache/'one')
+    second = broken_movie(window.cache/'two')
+    window.scanned([first, second])
+    window.media_filter.setCurrentIndex(2)
+    click_row(window, 0)
+    wait_for(lambda: not window.busy and len(window.recovery.clips) == 2)
+    paths = [clip.path for clip in window.recovery.clips]
+    click_row(window, 1)
+    wait_for(lambda: not window.busy and len(window.recovery.clips) == 2)
+    click_row(window, 0)
+    assert not window.busy
+    assert [clip.path for clip in window.recovery.clips] == paths
+    assert all(path.exists() for path in paths)

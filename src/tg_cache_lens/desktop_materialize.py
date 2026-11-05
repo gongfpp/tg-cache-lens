@@ -1,23 +1,18 @@
 """Create temporary, range-indexed media snapshots from Desktop cache parts."""
 from dataclasses import dataclass
-from contextlib import nullcontext
 from hashlib import sha256
 from pathlib import Path
 import struct
 import tempfile
 import zlib
+import os
 
-from .desktop_store import read_document, read_plain, read_index_snapshot
+from .desktop_store import DiskSlice, read_document, read_plain, read_index_snapshot
 from . import core
 from .desktop_parts import Part
 from .sparse import prepare_sparse
 
 SPOOL_THRESHOLD = 64 * 1024 * 1024
-
-
-def document_spool(snapshot, base_key, directory=None):
-    group = snapshot.groups.get(base_key, {})
-    return tempfile.TemporaryFile(dir=directory) if sum(entry.size for entry in group.values()) > SPOOL_THRESHOLD else nullcontext(None)
 
 
 @dataclass(frozen=True)
@@ -85,12 +80,8 @@ def write_snapshot(database, destination, parts, ranges):
                 if event is not None and event.is_set(): raise core.WorkCancelled()
                 output.seek(part.offset)
                 output.write(part.data[:] if not isinstance(part.data, bytes) else part.data)
-        payload = struct.pack('<q', -1) + b''.join(
-            struct.pack('<qq', start, end - start) for start, end in ranges)
-        metadata = struct.pack('<IIi', 0x7bac1487, zlib.crc32(payload), len(ranges)) + payload
-        with metadata_path.open('xb') as output:
-            metadata_created = True
-            output.write(metadata)
+        write_metadata(metadata_path, ranges)
+        metadata_created = True
     except BaseException:
         if metadata_created:
             metadata_path.unlink(missing_ok=True)
@@ -99,13 +90,60 @@ def write_snapshot(database, destination, parts, ranges):
         raise
 
 
+def write_metadata(path, ranges):
+    payload = struct.pack('<q', -1) + b''.join(
+        struct.pack('<qq', start, end - start) for start, end in ranges)
+    metadata = struct.pack('<IIi', 0x7bac1487, zlib.crc32(payload), len(ranges)) + payload
+    created = False
+    try:
+        with path.open('xb') as output:
+            created = True
+            output.write(metadata)
+    except BaseException:
+        if created: path.unlink(missing_ok=True)
+        raise
+
+
 def materialize(database, base_key, local_key, destination, snapshot=None):
     validate_destination(database, destination)
     snapshot = snapshot or read_index_snapshot(database, local_key)
     Path(destination).parent.mkdir(parents=True, exist_ok=True)
-    with document_spool(snapshot, base_key, Path(destination).parent) as spool:
-        parts, ranges, ambiguous, unavailable, identity = read_document(database, base_key, local_key, snapshot, spool)
+    group = snapshot.groups.get(base_key, {})
+    use_spool = sum(entry.size for entry in group.values()) > SPOOL_THRESHOLD
+    if not use_spool:
+        parts, ranges, ambiguous, unavailable, identity = read_document(database, base_key, local_key, snapshot)
         write_snapshot(database, destination, parts, ranges)
+    else:
+        # Large continuous documents can use the verified spool itself as the
+        # snapshot. Fragmented/conflicting data keeps the usual sparse copy.
+        spool = tempfile.NamedTemporaryFile(dir=Path(destination).parent, delete=False)
+        staging = Path(spool.name)
+        try:
+            with spool:
+                parts, ranges, ambiguous, unavailable, identity = read_document(database, base_key, local_key, snapshot, spool)
+                spool.flush()
+                length = os.fstat(spool.fileno()).st_size
+                direct = (ranges == [(0, length)] and length > 0
+                          and sum(len(part.data) for part in parts) == length
+                          and all(isinstance(part.data, DiskSlice) and part.offset == part.data.start for part in parts))
+                if not direct:
+                    write_snapshot(database, destination, parts, ranges)
+            if direct:
+                target = Path(destination)
+                try:
+                    os.link(staging, target)
+                except OSError:
+                    with staging.open('rb') as source:
+                        for part in parts: part.data.stream = source
+                        write_snapshot(database, destination, parts, ranges)
+                else:
+                    try:
+                        write_metadata(Path(str(target) + '.meta'), ranges)
+                    except BaseException:
+                        target.unlink(missing_ok=True)
+                        raise
+        finally:
+            staging.unlink(missing_ok=True)
     times = [entry.store_time for entry in snapshot.groups[base_key].values() if entry.store_time]
     return DocumentSource(Path(database).resolve(), base_key, local_key, identity, ambiguous, unavailable, max(times) if times else None)
 

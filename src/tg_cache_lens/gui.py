@@ -1,6 +1,7 @@
 """Standalone Qt window; all media work runs away from the GUI thread."""
 from pathlib import Path
 from datetime import datetime
+from collections import OrderedDict
 import getpass
 from hashlib import sha256
 import os
@@ -31,10 +32,11 @@ COLUMN_PERCENT = 68
 
 
 def exportable(row):
-    return row.status in ELIGIBLE or recovery.can_export_cached(row)
+    return row.status == 'pending' or row.status in ELIGIBLE or recovery.can_export_cached(row)
 
 
 def status_label(row):
+    if row.status == 'pending': return '待加载'
     return '可导出' if exportable(row) else core.LABELS[row.status]
 
 
@@ -163,8 +165,9 @@ class Thumbnails(QThread):
         for row in self.rows:
             if self.isInterruptionRequested(): return
             try:
+                source = getattr(row.desktop_source, 'sample', row.path) if getattr(row, 'desktop_source', None) else row.path
                 result = subprocess.run([core.binary('ffmpeg'), '-nostdin', '-v', 'error', '-threads', '1',
-                    '-i', str(row.path), '-frames:v', '1', '-vf', 'scale=640:360:force_original_aspect_ratio=decrease',
+                    '-i', str(source), '-frames:v', '1', '-vf', 'scale=640:360:force_original_aspect_ratio=decrease',
                     '-f', 'image2pipe', '-c:v', 'mjpeg', '-threads', '1', '-'], capture_output=True, timeout=8,
                     creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
                 picture = QImage.fromData(result.stdout)
@@ -265,6 +268,9 @@ class MediaRow(QWidget):
 
     def refresh_state(self):
         status = self.media.status
+        self.duration_label.setText(duration(self.media.duration))
+        self.cached_amount.setText(size(self.media.cached_size) if self.media.cached_size is not None else '未知')
+        self.check.setEnabled(exportable(self.media))
         foreground, background = (('#9ce9c0', '#204c38') if status == 'ready' else
                                   ('#9cd9ed', '#194355') if exportable(self.media) else
                                   ('#f1c587', '#49391f') if status == 'partial' else
@@ -308,13 +314,17 @@ class Window(QMainWindow):
         self.output = Path(output or last_output or core.default_output()).expanduser()
         self.timeout = timeout
         self.rows = []; self.widgets = {}; self.images = {}; self.jobs = []; self.thumb_attempted = set()
-        self.active_job = None; self.preview_analysis_job = None; self.thumb_job = None; self.busy = False; self.closing = False
+        self.active_job = None; self.preview_analysis_job = None; self.thumb_job = None; self.busy = False; self.closing = False; self.stopping_analysis = False
         self.export_hold_job = None; self.export_held_paths = set(); self.deferred_removals = set()
         self.inspection_id = 0
+        self.pending_lazy_preview = None
         self.current = None; self.preview_path = None; self.pending_preview = None; self.last_results = None
         self.failed_export_rows = []
         self.failed_export_clips = ()
         self.temp = tempfile.TemporaryDirectory(prefix='cache-lens-gui-')
+        self.analysis_cache = OrderedDict()
+        self.scan_cache = {}
+        self.lazy_filter_failures = set()
         self.desktop_owner = None; self.retired_desktop = []; self.retirement_pending = False
         self.setWindowTitle('Cache Lens')
         self.resize(1440, 900)
@@ -551,21 +561,41 @@ class Window(QMainWindow):
         self.empty_preview.show()
         self.preview_panel.hide()
         self.clear_preview()
+        retained = {clip.path for clips in self.analysis_cache.values() for clip in clips}
         for clip in self.recovery.clips:
-            self.remove_temporary(clip.path)
+            if clip.path not in retained: self.remove_temporary(clip.path)
         self.recovery.populate([])
 
     def open_preview(self, item):
         if item.isHidden(): return
         row = item.data(Qt.ItemDataRole.UserRole)
         if self.current is not row: self.select(item)
-        if not self.inspector.isHidden(): return
+        if not self.inspector.isHidden():
+            if row.status == 'pending' and not self.busy: self.start_inspection()
+            return
         self.empty_preview.hide()
         self.inspector.show()
         self.splitter.setSizes([900, 500, 0])
+        if row.status == 'pending':
+            self.inspector.setCurrentWidget(self.recovery)
+            self.recovery.title.setText('视频预览：  ' + row.key)
+            self.recovery.populate([])
+            self.recovery.notice.setText('正在加载视频…')
+            self.recovery.export_cached.hide()
+            self.recovery.set_analyzing(True)
+            self.start_inspection()
+            return
         if row.status == 'partial' or (row.status == 'unknown' and getattr(row, 'desktop_source', None)):
             self.inspector.setCurrentWidget(self.recovery)
             self.recovery.reset(row)
+            cached = self.analysis_cache.get((str(row.path), row.fingerprint))
+            if cached is not None and all(clip.path.is_file() for clip in cached):
+                self.analysis_cache.move_to_end((str(row.path), row.fingerprint))
+                self.recovery.populate(cached)
+                self.recovery.analysis_finished()
+                if row.status == 'unknown' and recovery.can_export_cached(row):
+                    self.preview_cached(row)
+                return
             self.status.setText("准备预览…")
         else:
             self.inspector.setCurrentWidget(self.preview_panel)
@@ -580,6 +610,7 @@ class Window(QMainWindow):
     def analyze_clips(self):
         if not self.busy and self.current:
             self.close_clip()
+            self.analysis_cache.pop((str(self.current.path), self.current.fingerprint), None)
             for clip in self.recovery.clips: self.remove_temporary(clip.path)
             self.recovery.populate([])
             self.recovery.notice.setText('正在查找可独立解码的片段…')
@@ -593,6 +624,14 @@ class Window(QMainWindow):
         row = self.current
         if self.busy:
             self.pending_preview = row.path
+        elif row.status == 'pending':
+            from .desktop_scan import prepare_lazy
+            request = self.inspection_id
+            def ready(prepared):
+                if request == self.inspection_id and self.current is row and not self.inspector.isHidden():
+                    self.pending_lazy_preview = row
+            self.task(lambda progress: (progress(0, 0, '分析视频'), prepare_lazy(row))[1], ready, analysis=True)
+            self.preview_analysis_job = self.active_job
         elif row.status == 'partial' or (row.status == 'unknown' and getattr(row, 'desktop_source', None)):
             request = self.inspection_id
             self.recovery.set_analyzing(True)
@@ -609,6 +648,16 @@ class Window(QMainWindow):
         if self.closing or request != self.inspection_id or self.current is not row or self.inspector.isHidden():
             for clip in clips: self.remove_temporary(clip.path)
             return
+        key = (str(row.path), row.fingerprint)
+        self.analysis_cache[key] = tuple(clips)
+        self.analysis_cache.move_to_end(key)
+        def cache_size():
+            return sum(clip.path.stat().st_size for group in self.analysis_cache.values() for clip in group if clip.path.exists())
+        while len(self.analysis_cache) > 3 or (len(self.analysis_cache) > 1 and cache_size() > 512 * 1024 * 1024):
+            _, old = self.analysis_cache.popitem(last=False)
+            for clip in old: self.remove_temporary(clip.path)
+        if cache_size() > 512 * 1024 * 1024:
+            self.analysis_cache.pop(key, None)
         self.recovery.analysis_finished()
         self.filter_summary()
 
@@ -645,7 +694,7 @@ class Window(QMainWindow):
             if self.current is row and all(clip in self.recovery.clips for clip in held):
                 self.failed_export_clips = held
                 self.retry_button.show()
-        self.task(lambda progress: recovery.export_merged_clips(row, held, output, self.timeout), finished,
+        self.task(lambda progress: recovery.export_merged_clips(row, held, output, self.timeout, progress), finished,
                   on_failure=failed)
         self.export_hold_job = self.active_job
 
@@ -819,6 +868,43 @@ class Window(QMainWindow):
         if not self.busy: self.filter_summary()
         self.start_thumbnails()
         self.update_actions()
+        if (self.min_size.value() or self.max_size.value()) and not self.busy:
+            QTimer.singleShot(0, self.prepare_filter_metadata)
+
+    def prepare_filter_metadata(self):
+        if self.busy or self.closing or self.stopping_analysis:
+            return
+        if not (self.min_size.value() or self.max_size.value() or self.sort.currentIndex() == 1):
+            return
+        pending = [row for row in self.rows if row.status == 'pending' and str(row.path) not in self.lazy_filter_failures]
+        if not pending:
+            return
+        from .desktop_scan import prepare_lazy
+        failures = []
+        def operation(progress):
+            job = QThread.currentThread()
+            for index, row in enumerate(pending):
+                progress(index, len(pending), '分析视频')
+                try:
+                    prepare_lazy(row)
+                except (OSError, ValueError, RuntimeError) as exc:
+                    self.lazy_filter_failures.add(str(row.path))
+                    failures.append(f'{row.key}: {exc}')
+                    continue
+                job.row_ready.emit(row)
+            progress(len(pending), len(pending), '分析视频')
+        def update(row):
+            widget = self.widgets.get(str(row.path))
+            if widget: widget.refresh_state()
+            self.update_filter_counts()
+            self.apply_filter()
+        def finished(result):
+            self.sort_rows()
+            if failures:
+                self.last_results = ([], failures)
+                self.errors_button.setVisible(True)
+                self.status.setText(f'{len(failures)} 项加载失败')
+        self.task(operation, finished, analysis=True, on_row=update)
 
     def filter_summary(self):
         for name, lower, upper in (('大小', self.min_size, self.max_size), ('时长', self.min_duration, self.max_duration)):
@@ -842,6 +928,8 @@ class Window(QMainWindow):
             unknown = [r for r in self.rows if key(r) is None]
             rows = sorted(known, key=key, reverse=self.sort_descending) + unknown
         self.populate(rows, selected)
+        if mode == 1 and not self.busy:
+            QTimer.singleShot(0, self.prepare_filter_metadata)
 
     def sort_by_column(self, mode):
         self.sort_descending = not self.sort_descending if self.sort_column == mode else mode != 3
@@ -1001,10 +1089,17 @@ class Window(QMainWindow):
             self.update_details()
         if self.closing: self.close()
         else:
+            if self.pending_lazy_preview is not None:
+                row, self.pending_lazy_preview = self.pending_lazy_preview, None
+                if self.current is row and self.list.currentItem() and not self.inspector.isHidden():
+                    self.inspector.hide()
+                    self.open_preview(self.list.currentItem())
             if self.pending_preview is not None:
                 pending, self.pending_preview = self.pending_preview, None
                 if self.current and self.current.path == pending and not self.inspector.isHidden(): self.start_inspection()
             self.start_thumbnails()
+            if not self.stopping_analysis:
+                QTimer.singleShot(0, self.prepare_filter_metadata)
 
     def on_progress(self, n, total, text):
         if self.sender() is not self.active_job:
@@ -1050,6 +1145,10 @@ class Window(QMainWindow):
             self.status.setText(str(exc))
             return
         self.dismiss()
+        self.lazy_filter_failures.clear()
+        for clips in self.analysis_cache.values():
+            for clip in clips: self.remove_temporary(clip.path)
+        self.analysis_cache.clear()
         self.failed_export_rows = []
         self.failed_export_clips = ()
         self.retry_button.hide()
@@ -1063,7 +1162,7 @@ class Window(QMainWindow):
         def operation(progress):
             if desktop_root:
                 job = QThread.currentThread()
-                rows = desktop_scan.scan(desktop_root, owner.name, passcode, progress=progress, timeout=self.timeout, data_name=data_name, cancelled=job.isInterruptionRequested, on_row=job.row_ready.emit)
+                rows = desktop_scan.scan(desktop_root, owner.name, passcode, progress=progress, timeout=self.timeout, data_name=data_name, cancelled=job.isInterruptionRequested, on_row=job.row_ready.emit, scan_cache=self.scan_cache, lazy=True)
                 progress(len(rows), len(rows), '扫描完成')
             else:
                 rows = core.scan(root, progress=progress, timeout=self.timeout)

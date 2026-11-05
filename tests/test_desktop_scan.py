@@ -677,3 +677,153 @@ def test_nonvideo_temporary_snapshot_is_removed(cache, tmp_path):
     assert len(rows) == 1 and not rows.warnings
     assert sorted(path.name for path in workdir.iterdir()) == sorted([
         rows[0].path.name, rows[0].path.name + '.meta'])
+
+
+def test_rescan_reuses_unchanged_snapshot_and_reloads_changed_source(cache, tmp_path, monkeypatch):
+    from tg_cache_lens import desktop_scan
+    root, _ = make_desktop(cache, tmp_path)
+    calls = []
+    original = desktop_scan.materialize
+    def counted(*args, **kwargs):
+        calls.append(1)
+        return original(*args, **kwargs)
+    monkeypatch.setattr(desktop_scan, 'materialize', counted)
+    memory = {}
+    first = tmp_path/'first'; first.mkdir()
+    second = tmp_path/'second'; second.mkdir()
+    third = tmp_path/'third'; third.mkdir()
+    rows = scan(root, first, scan_cache=memory)
+    reused = scan(root, second, scan_cache=memory)
+    assert len(calls) == 1 and reused[0].fingerprint == rows[0].fingerprint
+    rows[0].path.unlink()
+    assert reused[0].path.exists()
+    source = root/'user_data'/'media_cache'/'0'/'21'/'436587A9CBED'
+    with source.open('ab') as file:
+        file.write(b'changed')
+    scan(root, third, scan_cache=memory)
+    assert len(calls) == 2
+
+
+def test_large_nonvideo_cache_is_identified_without_full_decryption(cache, tmp_path, monkeypatch):
+    from tg_cache_lens import desktop_scan
+    root, _ = make_desktop(cache, tmp_path)
+    database = root/'user_data'/'cache'
+    version = database/'0'; version.mkdir(parents=True)
+    value = b'not a video' + bytes(1024 * 1024)
+    record = bytearray(32)
+    record[0] = 1; record[2:5] = len(value).to_bytes(3, 'little')
+    record[5:12] = bytes([1]) + bytes(6)
+    struct.pack_into('<IQQ', record, 12, xxhash.xxh32_intdigest(value), 0x101, 1)
+    write_container(version/'10'/'000000000000', bytes(range(256)), value)
+    write_container(version/'binlog', bytes(range(256)), bytes(16) + record)
+    original = desktop_scan.read_value
+    def reject_full(directory, entry, key):
+        assert entry.key != (0x101, 1)
+        return original(directory, entry, key)
+    monkeypatch.setattr(desktop_scan, 'read_value', reject_full)
+    work = tmp_path/'work'; work.mkdir()
+    assert len(scan(root, work)) == 1
+
+
+def test_contiguous_large_snapshot_reuses_verified_spool(cache, tmp_path, monkeypatch):
+    from tg_cache_lens import desktop_materialize
+    root, video = make_desktop(cache, tmp_path)
+    monkeypatch.setattr(desktop_materialize, 'SPOOL_THRESHOLD', 0)
+    monkeypatch.setattr(desktop_materialize, 'write_snapshot', lambda *args: pytest.fail('连续缓存不应再次复制'))
+    work = tmp_path/'work'; work.mkdir()
+    rows = scan(root, work)
+    assert len(rows) == 1 and rows[0].path.read_bytes() == video
+    rows[0].desktop_source.revalidate()
+
+
+def test_lazy_desktop_scan_materializes_only_when_requested(cache, tmp_path, monkeypatch):
+    from tg_cache_lens import desktop_scan
+    root, video = make_desktop(cache, tmp_path)
+    monkeypatch.setattr(desktop_scan, 'LAZY_THRESHOLD', 0)
+    work = tmp_path/'work'; work.mkdir()
+    row = scan(root, work, lazy=True)[0]
+    assert row.status == 'pending' and not row.path.exists()
+    assert row.desktop_source.sample.exists()
+    desktop_scan.prepare_lazy(row)
+    assert row.status == 'unknown' and row.path.read_bytes() == video
+    row.desktop_source.revalidate()
+
+
+def test_gui_loads_lazy_video_when_opened(cache, tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QApplication
+    from tg_cache_lens import desktop_scan
+    from tg_cache_lens.gui import Window
+    from test_gui import click_row, wait_for
+    app = QApplication.instance() or QApplication([])
+    root, _ = make_desktop(cache, tmp_path)
+    monkeypatch.setattr(desktop_scan, 'LAZY_THRESHOLD', 0)
+    window = Window(root.parent, tmp_path/'exports'); window.thumbnails_button.setChecked(False); window.show()
+    try:
+        window.scan(); wait_for(lambda: not window.busy and len(window.rows) == 1)
+        assert window.rows[0].status == 'pending' and not window.rows[0].path.exists()
+        window.media_filter.setCurrentIndex(2)
+        click_row(window)
+        wait_for(lambda: not window.busy and window.rows[0].status == 'unknown')
+        assert window.rows[0].path.exists()
+        assert Path(window.clip_player.source().toLocalFile()) == window.rows[0].path
+        window.export_rows([window.rows[0]])
+        wait_for(lambda: not window.busy and window.last_results is not None)
+        assert len(window.last_results[0]) == 1 and not window.last_results[1]
+    finally:
+        window.close(); app.processEvents()
+
+
+def test_export_prepares_lazy_desktop_video_and_rechecks_source(cache, tmp_path, monkeypatch):
+    from tg_cache_lens import desktop_scan
+    from tg_cache_lens.cli import batch
+    root, _ = make_desktop(cache, tmp_path)
+    monkeypatch.setattr(desktop_scan, 'LAZY_THRESHOLD', 0)
+    work = tmp_path/'work'; work.mkdir()
+    row = scan(root, work, lazy=True)[0]
+    paths, errors = batch([row], tmp_path/'output')
+    assert row.status == 'unknown' and len(paths) == 1 and not errors
+    write_container(root/'user_data'/'media_cache'/'0'/'21'/'436587A9CBED', bytes(range(256)), b'changed')
+    paths, errors = batch([row], tmp_path/'output')
+    assert not paths and errors
+
+
+def test_cli_all_complete_includes_contiguous_desktop_cache(cache, tmp_path, capsys):
+    from tg_cache_lens.__main__ import main
+    root, _ = make_desktop(cache, tmp_path)
+    assert main(['export', '--cache', str(root), '--output', str(tmp_path/'output'), '--all-complete']) == 0
+    assert len(list((tmp_path/'output').glob('*.mp4'))) == 1
+
+
+def test_size_filter_loads_lazy_video_before_applying_range(cache, tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QApplication
+    from tg_cache_lens import desktop_scan
+    from tg_cache_lens.gui import Window
+    from test_gui import wait_for
+    app = QApplication.instance() or QApplication([])
+    root, video = make_desktop(cache, tmp_path)
+    monkeypatch.setattr(desktop_scan, 'LAZY_THRESHOLD', 0)
+    window = Window(root.parent, tmp_path/'exports'); window.thumbnails_button.setChecked(False); window.show()
+    try:
+        window.scan(); wait_for(lambda: not window.busy and len(window.rows) == 1)
+        assert window.rows[0].status == 'pending'
+        window.min_size.setValue(.01)
+        wait_for(lambda: not window.busy and window.rows[0].status != 'pending')
+        assert window.rows[0].cached_size == len(video)
+        assert window.list.item(0).isHidden() == (len(video) < .01 * 1024**2)
+    finally:
+        window.close(); app.processEvents()
+
+
+def test_lazy_load_refreshes_index_after_other_cache_activity(cache, tmp_path, monkeypatch):
+    from tg_cache_lens import desktop_scan
+    from tg_cache_lens.desktop_crypto import read_tdef
+    root, video = make_desktop(cache, tmp_path)
+    monkeypatch.setattr(desktop_scan, 'LAZY_THRESHOLD', 0)
+    work = tmp_path/'work'; work.mkdir()
+    row = scan(root, work, lazy=True)[0]
+    log = root/'user_data'/'media_cache'/'0'/'binlog'
+    key = bytes(range(256))
+    contents = read_tdef(log, key)
+    write_container(log, key, contents)
+    desktop_scan.prepare_lazy(row)
+    assert row.path.read_bytes() == video

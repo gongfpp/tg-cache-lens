@@ -9,6 +9,8 @@ import os
 import shutil
 import struct
 import tempfile
+import subprocess
+import time
 from itertools import islice
 
 from . import core
@@ -119,6 +121,51 @@ def probe(path, fields, timeout):
     return json.loads(raw)
 
 
+def stream_packets(path, timeout, progress):
+    """Read packet records as ffprobe writes them, without a Windows pipe."""
+    command = [core.binary('ffprobe'), '-v', 'error', '-show_data_hash', 'sha256',
+               '-show_entries', 'packet=stream_index,pos,size,pts_time,duration_time,flags,data_hash',
+               '-of', 'compact=p=0:nk=0', str(path)]
+    with tempfile.TemporaryDirectory(prefix='cache-lens-probe-') as folder:
+        output = Path(folder) / 'packets'
+        errors = Path(folder) / 'errors'
+        with output.open('wb') as writer, errors.open('wb') as stderr:
+            process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=writer, stderr=stderr,
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
+            deadline = time.monotonic() + timeout
+            try:
+                with output.open('rb') as reader:
+                    pending = b''
+                    while True:
+                        progress(0, 0, '分析片段')
+                        data = reader.read(65536)
+                        if data:
+                            pending += data
+                            lines = pending.split(b'\n')
+                            pending = lines.pop()
+                            for line in lines:
+                                fields = {}
+                                for field in line.decode('utf-8', errors='replace').rstrip('\r').split('|'):
+                                    if '=' in field:
+                                        key, value = field.split('=', 1)
+                                        fields[key] = value
+                                if 'stream_index' in fields:
+                                    fields['stream_index'] = int(fields['stream_index'])
+                                    yield fields
+                            continue
+                        if process.poll() is not None:
+                            if process.returncode:
+                                raise RuntimeError('读取媒体数据包失败')
+                            break
+                        if time.monotonic() >= deadline:
+                            raise RuntimeError('处理超时；可通过 --timeout 增加时限')
+                        time.sleep(.05)
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                process.wait()
+
+
 def checked_clip(source, dest, start, duration, timeout, include_audio=True):
     cmd = [core.binary('ffmpeg'), '-nostdin', '-v', 'error']
     if start is not None:
@@ -157,7 +204,7 @@ def can_export_cached(row):
             and ranges_for(row.fingerprint) == [(0, row.size)])
 
 
-def export_cached(row, output, timeout=600, fmt='mp4'):
+def export_cached(row, output, timeout=600, fmt='mp4', progress=lambda *args: None):
     """Export the continuous cached bytes, explicitly without claiming completeness."""
     if not can_export_cached(row):
         raise RuntimeError('缓存范围不连续，请先分析片段')
@@ -165,6 +212,7 @@ def export_cached(row, output, timeout=600, fmt='mp4'):
         raise ValueError('不支持的导出格式')
     output = prepare_output(row, output)
     source = row.desktop_source
+    progress(0, 0, '导出 · 检查缓存源')
     source.revalidate()
     if core.stamp(row.path) != row.fingerprint:
         raise RuntimeError('源缓存已变化，请重新扫描')
@@ -172,6 +220,7 @@ def export_cached(row, output, timeout=600, fmt='mp4'):
         with tempfile.TemporaryDirectory(prefix='.cache-lens-', dir=output) as work:
             ext = row.kind if fmt == 'original' else fmt
             candidate = Path(work)/f'cached.{ext}'
+            progress(0, 0, '导出 · 生成视频')
             if fmt == 'original':
                 shutil.copyfile(row.path, candidate)
             else:
@@ -190,6 +239,7 @@ def export_cached(row, output, timeout=600, fmt='mp4'):
                     core.run(command, timeout)
                 except RuntimeError as exc:
                     raise CachedMediaInvalid('缓存视频无法直接导出') from exc
+            progress(0, 0, '导出 · 验证视频')
             checked = core.inspect(candidate, deep=True, timeout=timeout)
             if not checked or checked.status != 'unknown' or not checked.duration:
                 raise CachedMediaInvalid('已缓存内容未通过解码，无法直接导出；请尝试分析片段')
@@ -275,45 +325,17 @@ def recover(row, directory, timeout=600, progress=lambda *args: None, on_clip=No
                             out.seek(a)
                             copy_range(source, out, a, b)
                 try:
-                    fields = 'format=start_time:stream=index,codec_type:packet=stream_index,pos,size,pts_time,duration_time,flags,data_hash'
-                    info = probe(masked, fields, timeout)
+                    info = probe(masked, 'format=start_time:stream=index,codec_type', timeout)
                 except RuntimeError:
                     info = {}
                 types = {s['index']: s['codec_type'] for s in info.get('streams', [])}
                 first_video = next((i for i, t in types.items() if t == 'video'), None)
                 origin = float(info.get('format', {}).get('start_time') or 0)
                 available_hashes = set()
-                runs = []
                 active = None
                 from bisect import bisect_right
                 starts = [a for a, _ in ranges]
-                for packet_index, packet in enumerate(info.get('packets', [])):
-                    if packet_index % 1024 == 0: progress(0, 0, '分析片段')
-                    stream = packet['stream_index']
-                    if stream != first_video and types.get(stream) != 'audio':
-                        continue
-                    pos, size = int(packet.get('pos', -1)), int(packet.get('size', 0))
-                    idx = bisect_right(starts, pos)-1
-                    if idx < 0 or size <= 0 or pos+size > ranges[idx][1]:
-                        active = None
-                        continue
-                    if 'data_hash' in packet:
-                        available_hashes.add(packet['data_hash'])
-                    if stream != first_video or 'pts_time' not in packet:
-                        continue
-                    pts = float(packet['pts_time'])
-                    # Long continuous ranges can take minutes to verify as a
-                    # single clip. Split on independently decodable keyframes
-                    # so usable clips arrive progressively.
-                    if (active is not None and 'K' in packet.get('flags', '')
-                            and pts - active[0] >= MAX_RECOVERY_RUN_SECONDS):
-                        active[1] = max(active[0], min(active[1], pts))
-                        active = None
-                    if active is None and 'K' in packet.get('flags', ''):
-                        active = [pts, pts]
-                        runs.append(active)
-                    if active is not None:
-                        active[1] = max(active[1], pts+float(packet.get('duration_time') or 0))
+
                 def recover_run(item):
                     number, (start, end) = item
                     progress(0, 0, '分析片段')
@@ -338,22 +360,62 @@ def recover(row, directory, timeout=600, progress=lambda *args: None, on_clip=No
 
                 with ThreadPoolExecutor(max_workers=3) as pool:
                     run_with_cancel = core.propagate_cancel(recover_run)
-                    jobs = iter(enumerate(runs))
                     pending = set()
-                    def fill():
-                        while len(pending) < 6:
-                            try: item = next(jobs)
-                            except StopIteration: break
-                            pending.add(pool.submit(run_with_cancel, item))
-                    fill()
+                    deferred = None
+                    number = 0
+                    def collect(block=False):
+                        nonlocal pending
+                        if not pending: return
+                        ready, pending = wait(pending, timeout=.2 if block else 0, return_when=FIRST_COMPLETED)
+                        for future in ready:
+                            clip = future.result()
+                            if clip: record(clip)
+                    def queue(run):
+                        nonlocal deferred, number
+                        if run is None: return
+                        # One completed run of lookahead lets interleaved audio
+                        # and reordered video packets reach the source hash set.
+                        if deferred is not None:
+                            while len(pending) >= 6:
+                                progress(0, 0, '分析片段')
+                                collect(True)
+                            pending.add(pool.submit(run_with_cancel, (number, deferred)))
+                            number += 1
+                        deferred = tuple(run)
                     try:
+                        if first_video is not None:
+                            for packet in stream_packets(masked, timeout, progress):
+                                collect()
+                                stream = packet['stream_index']
+                                if stream != first_video and types.get(stream) != 'audio':
+                                    continue
+                                pos, size = int(packet.get('pos', -1)), int(packet.get('size', 0))
+                                idx = bisect_right(starts, pos)-1
+                                if idx < 0 or size <= 0 or pos+size > ranges[idx][1]:
+                                    if active is not None:
+                                        queue(active)
+                                        active = None
+                                    continue
+                                if 'data_hash' in packet:
+                                    available_hashes.add(packet['data_hash'])
+                                if stream != first_video or 'pts_time' not in packet:
+                                    continue
+                                pts = float(packet['pts_time'])
+                                if (active is not None and 'K' in packet.get('flags', '')
+                                        and pts - active[0] >= MAX_RECOVERY_RUN_SECONDS):
+                                    active[1] = max(active[0], min(active[1], pts))
+                                    queue(active)
+                                    active = None
+                                if active is None and 'K' in packet.get('flags', ''):
+                                    active = [pts, pts]
+                                if active is not None:
+                                    active[1] = max(active[1], pts+float(packet.get('duration_time') or 0))
+                        queue(active)
+                        if deferred is not None:
+                            pending.add(pool.submit(run_with_cancel, (number, deferred)))
                         while pending:
                             progress(0, 0, '分析片段')
-                            ready, pending = wait(pending, timeout=.2, return_when=FIRST_COMPLETED)
-                            for future in ready:
-                                clip = future.result()
-                                if clip: record(clip)
-                            fill()
+                            collect(True)
                     finally:
                         for future in pending: future.cancel()
         if core.stamp(row.path) != before:
@@ -368,7 +430,7 @@ def recover(row, directory, timeout=600, progress=lambda *args: None, on_clip=No
         return sorted(result, key=lambda clip: clip.start)
 
 
-def export_merged_clips(row, clips, output, timeout):
+def export_merged_clips(row, clips, output, timeout, progress=lambda *args: None):
     """Merge selected verified clips in their original time order."""
     if not clips:
         return [], []
@@ -377,6 +439,7 @@ def export_merged_clips(row, clips, output, timeout):
     source = getattr(row, 'desktop_source', None)
     stage = '读取缓存源'
     try:
+        progress(0, 0, '导出 · 检查缓存源')
         if source:
             source.revalidate()
         if core.stamp(row.path) != row.fingerprint:
@@ -394,6 +457,7 @@ def export_merged_clips(row, clips, output, timeout):
             manifest.write_text(''.join(f"file '{concat_path(clip.path)}'\n" for clip in clips), encoding='utf-8')
             merged = work/'merged.mp4'
             stage = '合并片段'
+            progress(0, 0, '导出 · 合并片段')
             has_audio = [clip.audio if clip.audio is not None else any(
                 s.get('codec_type') == 'audio' for s in probe(clip.path, 'stream=codec_type', timeout).get('streams', []))
                 for clip in clips]
@@ -426,12 +490,14 @@ def export_merged_clips(row, clips, output, timeout):
                            '-movflags', '+faststart', str(merged)]
                 try:
                     core.run(command, timeout)
+                    progress(0, 0, '导出 · 验证视频')
                     checked = core.inspect(merged, deep=True, timeout=timeout)
                 except RuntimeError:
                     pass
             if not checked or checked.status != 'unknown' or not checked.duration:
                 merged.unlink(missing_ok=True)
                 encode_clips()
+                progress(0, 0, '导出 · 验证视频')
                 checked = core.inspect(merged, deep=True, timeout=timeout)
             if not checked or checked.status != 'unknown' or not checked.duration:
                 raise RuntimeError('合并结果未通过解码检查')

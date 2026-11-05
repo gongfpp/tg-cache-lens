@@ -19,7 +19,7 @@ import threading
 import time
 import zlib
 
-LABELS = {"ready": "完整可导出", "covered": "数据齐全·待验证", "partial": "数据不全",
+LABELS = {"pending": "待加载", "ready": "完整可导出", "covered": "数据齐全·待验证", "partial": "数据不全",
           "unknown": "完整性未知", "invalid": "无法验证"}
 
 @dataclass

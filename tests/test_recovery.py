@@ -219,3 +219,30 @@ def test_merge_reencodes_when_stream_copy_has_invalid_timestamps(tmp_path, monke
     paths, errors = recovery.export_merged_clips(row, clips, tmp_path/'output', 60)
     assert not errors and len(paths) == 1 and len(checks) == 2
     assert inspect(paths[0], deep=True).status == 'unknown'
+
+
+def test_regular_video_reports_verified_clips_before_packet_scan_finishes(tmp_path, monkeypatch):
+    import time
+    cache = tmp_path/'cache'; cache.mkdir()
+    movie = cache/'synthetic.mp4'
+    subprocess.run(['ffmpeg', '-v', 'error', '-f', 'lavfi', '-i', 'testsrc2=size=96x64:rate=12',
+                    '-t', '12', '-c:v', 'libx264', '-g', '12', '-keyint_min', '12',
+                    '-sc_threshold', '0', '-bf', '0', '-movflags', '+faststart', str(movie)], check=True)
+    length = movie.stat().st_size
+    write_map(movie, length, [(0, length - 1)])
+    row = core.inspect(movie)
+    assert row.status == 'partial'
+    original = recovery.stream_packets
+    finished = False
+    def slow_packets(*args):
+        nonlocal finished
+        for packet in original(*args):
+            time.sleep(.03)
+            yield packet
+        finished = True
+    monkeypatch.setattr(recovery, 'stream_packets', slow_packets)
+    monkeypatch.setattr(recovery, 'MAX_RECOVERY_RUN_SECONDS', 2.0)
+    early = []
+    work = tmp_path/'work'; work.mkdir()
+    clips = recovery.recover(row, work, on_clip=lambda clip: early.append(not finished))
+    assert clips and any(early) and finished

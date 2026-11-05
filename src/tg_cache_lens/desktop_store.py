@@ -120,6 +120,19 @@ def read_value(directory, entry, key):
     return value
 
 
+def read_value_prefix(directory, entry, key, length=24):
+    """Read only the authenticated header and a prefix for media identification.
+
+    Candidates are still read and checksum-verified in full before use.
+    """
+    path = Path(directory) / entry.relative_path()
+    before = _stamp(path)
+    payload = read_tdef(path, key, prefix=length)
+    if _stamp(path) != before:
+        raise CacheChanged('Desktop 缓存条目正在变化，请重试')
+    return payload[:min(entry.size, length)]
+
+
 def read_plain(database, entry_key, key, snapshot=None):
     """Read a current small-cache value and confirm its index is still current."""
     snapshot = snapshot or read_index_snapshot(database, key)

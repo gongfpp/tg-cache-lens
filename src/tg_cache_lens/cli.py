@@ -40,17 +40,32 @@ def batch(rows, output, fmt='mp4', timeout=600, progress=lambda *args: None, on_
         progress(n-1, len(rows), f'正在导出 {n}/{len(rows)} · {row.key}')
         try:
             from . import recovery
+            if row.status == 'pending':
+                from .desktop_scan import prepare_lazy
+                progress(n-1, len(rows), f'正在加载视频 {n}/{len(rows)}')
+                prepare_lazy(row)
+            if row.status == 'partial' and getattr(row, 'desktop_source', None):
+                with tempfile.TemporaryDirectory(prefix='cache-lens-recovery-') as work:
+                    clips = recovery.recover(row, work, timeout, lambda a, b, text: progress(n-1, len(rows), text))
+                    paths, failures = recovery.export_merged_clips(row, clips, output, timeout,
+                        lambda a, b, text: progress(n-1, len(rows), text))
+                    if failures: raise RuntimeError(failures[0])
+                    if not paths: raise RuntimeError('未找到可导出的片段')
+                    results.append(paths[0])
+                continue
             if recovery.can_export_cached(row):
                 try:
-                    results.append(recovery.export_cached(row, output, timeout, fmt))
+                    results.append(recovery.export_cached(row, output, timeout, fmt,
+                        lambda a, b, text: progress(n-1, len(rows), f'{text} · {n}/{len(rows)}')))
                 except recovery.CachedMediaInvalid:
                     if fmt != 'mp4':
                         raise
                     with tempfile.TemporaryDirectory(prefix='cache-lens-recovery-') as work:
-                        clips = recovery.recover(row, work, timeout)
+                        clips = recovery.recover(row, work, timeout, lambda a, b, text: progress(n-1, len(rows), f'{text} · {n}/{len(rows)}'))
                         if not clips:
                             raise RuntimeError('未找到可导出的片段')
-                        paths, failures = recovery.export_merged_clips(row, clips, output, timeout)
+                        paths, failures = recovery.export_merged_clips(row, clips, output, timeout,
+                            lambda a, b, text: progress(n-1, len(rows), f'{text} · {n}/{len(rows)}'))
                         if failures:
                             raise RuntimeError(failures[0])
                         if not paths:

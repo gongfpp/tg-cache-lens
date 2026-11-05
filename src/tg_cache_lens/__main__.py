@@ -71,11 +71,12 @@ def main(argv=None):
                 if row is None: raise RuntimeError('文件不是可识别的视频缓存')
                 rows = [row]
             else:
+                from .recovery import can_export_cached
                 scanned = core.scan(cache, timeout=args.timeout, passcode=os.environ.get('TG_CACHE_LENS_PASSCODE', ''))
                 for warning in getattr(scanned, 'warnings', []):
                     print(f'读取失败：{warning}', file=sys.stderr)
                 scan_errors = bool(getattr(scanned, 'warnings', []))
-                rows = [r for r in scanned if r.status in ('ready', 'covered')]
+                rows = [r for r in scanned if r.status in ('ready', 'covered') or can_export_cached(r)]
             result = report_batch(batch(rows, output, args.format, args.timeout,
                 progress_line), output)
             return 1 if scan_errors else result

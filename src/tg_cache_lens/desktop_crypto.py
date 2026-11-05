@@ -197,7 +197,7 @@ def load_modern_key(path, passcode=''):
     return local_key
 
 
-def read_tdef(path, key):
+def read_tdef(path, key, prefix=None):
     """Decrypt a complete TDEF payload; the caller trims entry padding."""
     if len(key) not in (64, 256):
         raise ValueError('不支持的本地密钥长度')
@@ -212,8 +212,8 @@ def read_tdef(path, key):
             if magic != b'TDEF':
                 raise ValueError('无法识别加密缓存文件')
         salt = source.read(64)
-        encrypted = source.read()
-    if len(salt) != 64 or len(encrypted) < 48 or len(encrypted) % 16:
+        encrypted = source.read() if prefix is None else source.read(48 + prefix)
+    if len(salt) != 64 or len(encrypted) < 48 or (prefix is None and len(encrypted) % 16):
         raise ValueError('加密缓存文件不完整')
     half = len(key) // 2
     aes_key = sha256(key[:half] + salt[:32]).digest()
