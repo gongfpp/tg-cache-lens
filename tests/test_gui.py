@@ -726,3 +726,39 @@ def test_export_status_remains_on_each_row_when_selection_changes(window, monkey
         wait_for(lambda: not window.busy)
     assert window.widgets[str(row.path)].exported_badge.text() == '导出失败'
     assert window.errors_button.isVisible()
+
+
+def test_failed_clip_export_can_retry_after_switching_video(window, tmp_path, monkeypatch):
+    from dataclasses import replace
+    from test_recovery import broken_movie
+    from tg_cache_lens import recovery
+    row = broken_movie(window.cache/'one')
+    other = replace(row, path=row.path.with_name('other'))
+    clips = recovery.recover(row, tmp_path)
+    calls = []
+    def fake_export(item, held, output, timeout, progress):
+        calls.append(item)
+        return ([], ['synthetic failure']) if len(calls) == 1 else ([output/'done.mp4'], [])
+    monkeypatch.setattr(recovery, 'export_merged_clips', fake_export)
+    window.scanned([row, other]); window.media_filter.setCurrentIndex(2)
+    window.current = row
+    window.save_clips(clips)
+    wait_for(lambda: not window.busy and bool(window.failed_export_clips))
+    window.select(window.list.item(1))
+    assert window.failed_export_clips and all(c.path.exists() for c in clips)
+    window.retry_failed()
+    wait_for(lambda: not window.busy and len(calls) == 2)
+    assert calls == [row, row]
+
+
+def test_snapshot_retirement_waits_for_parallel_export(window, tmp_path):
+    import tempfile
+    owner = tempfile.TemporaryDirectory(dir=tmp_path)
+    path = Path(owner.name)
+    window.retired_desktop.append(owner)
+    window.parallel_export_job = object()
+    window.retire_desktop_snapshots()
+    assert path.exists()
+    window.parallel_export_job = None
+    window.retire_desktop_snapshots()
+    assert not path.exists()

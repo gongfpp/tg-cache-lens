@@ -39,7 +39,8 @@ def batch(rows, output, fmt='mp4', timeout=600, progress=lambda *args: None, on_
     for n, row in enumerate(rows, 1):
         on_item(row, '正在导出')
         def stage(value, total, text):
-            on_item(row, f'导出 {value}%' if total == 100 else '正在导出')
+            label = text.replace('导出 · ', '').replace('分析片段', '分析中')
+            on_item(row, f'{label} {value}%' if total == 100 else label)
             progress(n-1, len(rows), f'{text} · {n}/{len(rows)}')
         progress(n-1, len(rows), f'正在导出 {n}/{len(rows)} · {row.key}')
         try:

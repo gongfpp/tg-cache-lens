@@ -325,6 +325,8 @@ class Window(QMainWindow):
         self.current = None; self.preview_path = None; self.pending_preview = None; self.last_results = None
         self.failed_export_rows = []
         self.failed_export_clips = ()
+        self.failed_clip_row = None
+        self.failed_clip_output = None
         self.temp = tempfile.TemporaryDirectory(prefix='cache-lens-gui-')
         self.analysis_cache = OrderedDict()
         self.scan_cache = {}
@@ -554,9 +556,6 @@ class Window(QMainWindow):
         self.scan(automatic=True)
 
     def dismiss(self):
-        if self.failed_export_clips:
-            self.failed_export_clips = ()
-            self.retry_button.hide()
         if self.preview_analysis_job is not None and self.preview_analysis_job is self.active_job:
             self.preview_analysis_job.requestInterruption()
         self.close_clip()
@@ -693,15 +692,17 @@ class Window(QMainWindow):
             for clip in self.recovery.clips: self.remove_temporary(clip.path)
             self.recovery.populate([])
 
-    def save_clips(self, clips):
+    def save_clips(self, clips, row=None, output=None):
         parallel = self.busy and self.preview_analysis_job is self.active_job
         if (self.busy and not parallel) or self.parallel_export_job or not clips: return
         self.close_clip()
-        row, output = self.current, self.output
+        row, output = row or self.current, output or self.output
         self.export_states[str(row.path)] = '正在导出'
         self.refresh_exported()
         held = tuple(clips)
         self.failed_export_clips = ()
+        self.failed_clip_row = None
+        self.failed_clip_output = None
         self.failed_export_rows = []
         self.retry_button.hide()
         self.errors_button.hide()
@@ -711,18 +712,20 @@ class Window(QMainWindow):
         def finished(result):
             self.export_item_state(row, '导出失败' if result[1] else '已导出片段')
             self.exported(result)
-            if result[1] and self.current is row and all(clip in self.recovery.clips for clip in held):
+            if result[1] and all(clip.path.exists() for clip in held):
                 self.failed_export_clips = held
+                self.failed_clip_row, self.failed_clip_output = row, output
                 self.retry_button.show()
         def failed():
             self.export_item_state(row, '导出失败')
-            if self.current is row and all(clip in self.recovery.clips for clip in held):
+            if all(clip.path.exists() for clip in held):
                 self.failed_export_clips = held
+                self.failed_clip_row, self.failed_clip_output = row, output
                 self.retry_button.show()
         operation = lambda progress: recovery.export_merged_clips(row, held, output, self.timeout, progress)
         if parallel:
             job = Job(operation, self); self.parallel_export_job = job; self.jobs.append(job)
-            job.progress.connect(lambda n, total, text: self.export_item_state(row, f'导出 {n}%' if total == 100 else '正在导出'))
+            job.progress.connect(lambda n, total, text: self.export_item_state(row, f"{text.replace('导出 · ', '')} {n}%" if total == 100 else text.replace('导出 · ', '')))
             job.result.connect(finished)
             job.failed.connect(lambda message: (failed(), self.show_error(message)))
             def finish_parallel():
@@ -731,6 +734,7 @@ class Window(QMainWindow):
                 self.export_held_paths.clear()
                 pending, self.deferred_removals = self.deferred_removals, set()
                 for path in pending: self.remove_temporary(path)
+                if self.retired_desktop and not self.retirement_pending: self.retire_desktop_snapshots()
                 if self.closing: self.close()
             job.finished.connect(finish_parallel)
             job.start()
@@ -794,6 +798,8 @@ class Window(QMainWindow):
         self.preview_path = None
 
     def remove_temporary(self, path):
+        if any(clip.path == path for clip in self.failed_export_clips):
+            return
         if path in self.export_held_paths:
             self.deferred_removals.add(path)
             return
@@ -807,15 +813,19 @@ class Window(QMainWindow):
         self.retirement_pending = False
         if self.closing:
             return  # closeEvent cleans the enclosing temporary directory.
-        if not any(isinstance(job, Thumbnails) and job.isRunning() for job in self.jobs):
+        if not self.parallel_export_job and not self.export_hold_job and not any(isinstance(job, Thumbnails) and job.isRunning() for job in self.jobs):
             remaining = []
             for owner in self.retired_desktop:
+                if self.failed_export_clips and self.failed_clip_row and self.failed_clip_row.path.is_relative_to(Path(owner.name)):
+                    remaining.append(owner)
+                    continue
                 try:
                     owner.cleanup()
                 except PermissionError:
                     remaining.append(owner)
             self.retired_desktop = remaining
-        if self.retired_desktop and not self.retirement_pending:
+        held_only = self.failed_export_clips and all(self.failed_clip_row.path.is_relative_to(Path(owner.name)) for owner in self.retired_desktop)
+        if self.retired_desktop and not held_only and not self.retirement_pending:
             self.retirement_pending = True
             QTimer.singleShot(100, self.retire_desktop_snapshots)
 
@@ -1118,6 +1128,7 @@ class Window(QMainWindow):
             self.export_held_paths.clear()
             pending, self.deferred_removals = self.deferred_removals, set()
             for path in pending: self.remove_temporary(path)
+            if self.retired_desktop and not self.retirement_pending: self.retire_desktop_snapshots()
         if self.stopping_analysis and self.preview_analysis_job is self.active_job:
             self.recovery.analysis_finished(stopped=True)
         if self.preview_analysis_job is self.active_job:
@@ -1150,7 +1161,7 @@ class Window(QMainWindow):
             return
         self.scan_has_progress = True
         if self.export_hold_job is self.active_job and self.export_hold_row:
-            self.export_item_state(self.export_hold_row, f'导出 {n}%' if total == 100 else '正在导出')
+            self.export_item_state(self.export_hold_row, f"{text.replace('导出 · ', '')} {n}%" if total == 100 else text.replace('导出 · ', ''))
         self.progress.setRange(0, total if total > 0 else 0)
         if total > 0: self.progress.setValue(n)
         self.status.setText(text if '导出' in text or '分析' in text else f'正在扫描 {n}/{total}')
@@ -1196,9 +1207,9 @@ class Window(QMainWindow):
             for clip in clips: self.remove_temporary(clip.path)
         self.analysis_cache.clear()
         self.failed_export_rows = []
-        self.failed_export_clips = ()
-        self.retry_button.hide()
-        self.errors_button.hide()
+        if not self.failed_export_clips:
+            self.retry_button.hide()
+            self.errors_button.hide()
         previous = self.desktop_owner
         owner = tempfile.TemporaryDirectory(prefix='desktop-', dir=self.temp.name) if desktop_root else None
         activated = False
@@ -1375,7 +1386,7 @@ class Window(QMainWindow):
     def retry_failed(self):
         if self.busy: return
         if self.failed_export_clips:
-            self.save_clips(self.failed_export_clips)
+            self.save_clips(self.failed_export_clips, self.failed_clip_row, self.failed_clip_output)
         elif self.failed_export_rows:
             self.export_rows(self.failed_export_rows)
 

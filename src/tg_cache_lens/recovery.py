@@ -351,7 +351,7 @@ def recover(row, directory, timeout=600, progress=lambda *args: None, on_clip=No
                         try:
                             length, has_audio = checked_clip(masked, target, max(0, start-origin), clip_span, timeout, with_audio)
                             packets = probe(target, 'packet=data_hash', timeout).get('packets', [])
-                            if not packets or any(p.get('data_hash') not in available_hashes for p in packets):
+                            if not packets or any(bytes.fromhex(p.get('data_hash', '').removeprefix('SHA256:')) not in available_hashes for p in packets):
                                 raise ValueError('片段引用了未缓存的数据包')
                             return Clip(target, start-origin, length, audio=has_audio)
                         except (ValueError, RuntimeError):
@@ -397,7 +397,7 @@ def recover(row, directory, timeout=600, progress=lambda *args: None, on_clip=No
                                         active = None
                                     continue
                                 if 'data_hash' in packet:
-                                    available_hashes.add(packet['data_hash'])
+                                    available_hashes.add(bytes.fromhex(packet['data_hash'].removeprefix('SHA256:')))
                                 if stream != first_video or 'pts_time' not in packet:
                                     continue
                                 pts = float(packet['pts_time'])
