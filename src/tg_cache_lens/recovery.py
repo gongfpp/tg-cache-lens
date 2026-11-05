@@ -123,9 +123,9 @@ def probe(path, fields, timeout):
 
 def stream_packets(path, timeout, progress):
     """Read packet records as ffprobe writes them, without a Windows pipe."""
-    command = [core.binary('ffprobe'), '-v', 'error', '-show_data_hash', 'sha256',
+    command = [core.binary('ffprobe'), '-v', 'error', '-show_optional_fields', 'always', '-show_data_hash', 'sha256',
                '-show_entries', 'packet=stream_index,pos,size,pts_time,duration_time,flags,data_hash',
-               '-of', 'compact=p=0:nk=0', str(path)]
+               '-of', 'compact=p=0:nk=1', str(path)]
     with tempfile.TemporaryDirectory(prefix='cache-lens-probe-') as folder:
         output = Path(folder) / 'packets'
         errors = Path(folder) / 'errors'
@@ -144,14 +144,15 @@ def stream_packets(path, timeout, progress):
                             lines = pending.split(b'\n')
                             pending = lines.pop()
                             for line in lines:
-                                fields = {}
-                                for field in line.decode('utf-8', errors='replace').rstrip('\r').split('|'):
-                                    if '=' in field:
-                                        key, value = field.split('=', 1)
-                                        fields[key] = value
-                                if 'stream_index' in fields:
-                                    fields['stream_index'] = int(fields['stream_index'])
-                                    yield fields
+                                values = line.decode('utf-8', errors='replace').rstrip('\r').split('|')
+                                if not values[0].isdigit():
+                                    continue
+                                if len(values) < 7:
+                                    raise ValueError('媒体数据包信息不完整')
+                                names = ('stream_index', 'pts_time', 'duration_time', 'size', 'pos', 'flags', 'data_hash')
+                                fields = {key: value for key, value in zip(names, values) if value and value != 'N/A'}
+                                fields['stream_index'] = int(fields['stream_index'])
+                                yield fields
                             continue
                         if process.poll() is not None:
                             if process.returncode:

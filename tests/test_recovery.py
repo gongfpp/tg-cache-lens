@@ -246,3 +246,17 @@ def test_regular_video_reports_verified_clips_before_packet_scan_finishes(tmp_pa
     work = tmp_path/'work'; work.mkdir()
     clips = recovery.recover(row, work, on_clip=lambda clip: early.append(not finished))
     assert clips and any(early) and finished
+
+
+def test_compact_packet_stream_matches_ffprobe_with_audio_and_b_frames(tmp_path):
+    movie = tmp_path/'synthetic.mp4'
+    subprocess.run(['ffmpeg','-v','error','-f','lavfi','-i','testsrc2=size=64x64:rate=12',
+                    '-f','lavfi','-i','sine=frequency=440','-t','2','-c:v','libx264','-bf','3',
+                    '-c:a','aac',str(movie)], check=True)
+    fields = 'packet=stream_index,pos,size,pts_time,duration_time,flags,data_hash'
+    expected = recovery.probe(movie, fields, 30)['packets']
+    actual = list(recovery.stream_packets(movie, 30, lambda *args: None))
+    assert len(actual) == len(expected)
+    assert actual == [{k: (int(v) if k == 'stream_index' else str(v)) for k, v in packet.items()
+                       if k in ('stream_index','pos','size','pts_time','duration_time','flags','data_hash')}
+                      for packet in expected]
