@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 import json
@@ -161,12 +161,16 @@ def propagate_cancel(function):
     return wrapped
 
 
-def run(command, timeout=30):
+def run(command, timeout=30, progress=None, duration=None):
     event = current_cancel_event()
     if event is not None and event.is_set(): raise WorkCancelled()
     # File-backed output avoids waiting for inherited pipe handles from other
     # concurrently launched Windows media processes.
-    with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
+    progress_folder = tempfile.TemporaryDirectory(prefix='cache-lens-progress-') if progress and duration and duration > 0 else nullcontext(None)
+    with progress_folder as progress_dir, tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
+        progress_path = Path(progress_dir) / 'progress.txt' if progress_dir else None
+        if progress and duration and duration > 0:
+            command = [command[0], '-progress', str(progress_path), '-nostats', *command[1:]]
         process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr,
                                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
         deadline = time.monotonic() + timeout
@@ -179,6 +183,13 @@ def run(command, timeout=30):
                     process.wait(timeout=min(.2, remaining))
                     break
                 except subprocess.TimeoutExpired:
+                    if progress and duration and progress_path.is_file():
+                        try:
+                            lines = progress_path.read_text(errors='replace').splitlines()
+                            values = [line.split('=', 1)[1] for line in lines if line.startswith('out_time_us=')]
+                            if values: progress(min(99, max(0, int(int(values[-1]) / (duration * 1000000) * 100))))
+                        except (OSError, ValueError):
+                            pass
                     continue
         except BaseException as exc:
             process.kill()
@@ -346,7 +357,7 @@ def publish_temp(temp, target):
         os.link(temp, target)
 
 
-def export(item, output, fmt="mp4", timeout=600):
+def export(item, output, fmt="mp4", timeout=600, progress=None):
     if fmt not in ("mp4", "mkv", "original"): raise ValueError("不支持的导出格式")
     # Always recheck: a prior report is not authority to export changed bytes.
     fresh = inspect(item.path, deep=True, timeout=timeout)
@@ -375,7 +386,7 @@ def export(item, output, fmt="mp4", timeout=600):
             if fmt == "mp4" and (fresh.codec not in ("h264", "hevc", "mpeg4", "av1") or fresh.audio not in ("", "aac", "mp3", "alac")):
                 codec = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
                          "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2", "-threads", "2", "-c:a", "aac"]
-            run(command+codec+(["-movflags", "+faststart"] if fmt == "mp4" else [])+[str(temp)], timeout)
+            run(command+codec+(["-movflags", "+faststart"] if fmt == "mp4" else [])+[str(temp)], timeout, progress, fresh.duration)
         # Check the produced file rather than trusting an ffmpeg exit status alone.
         checked = inspect(temp, deep=True, timeout=timeout)
         if not checked or checked.status == "invalid": raise RuntimeError("输出文件未通过解码检查")

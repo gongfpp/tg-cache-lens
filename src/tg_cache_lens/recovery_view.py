@@ -116,8 +116,11 @@ class RecoveryView(QWidget):
         self.table.setItem(index, 4, QTableWidgetItem('可导出'))
 
     def append_clip(self, clip):
+        self.append_clips([clip])
+
+    def append_clips(self, clips):
         self.table.blockSignals(True)
-        self._insert_clip(clip)
+        for clip in clips: self._insert_clip(clip)
         self.table.blockSignals(False)
         if self.table.currentRow() < 0: self.table.selectRow(0)
         self.tabs.setTabText(0, f'缓存片段（{len(self.clips)}）')
@@ -149,5 +152,5 @@ class RecoveryView(QWidget):
     def refresh(self):
         selected = self.selected()
         self.save.setText(f'合并导出 {len(selected)} 个片段 · {sum(c.length for c in selected):.2f} 秒')
-        self.save.setEnabled(bool(selected) and not self.analyzing)
+        self.save.setEnabled(bool(selected))
         self.watch.setEnabled(0 <= self.table.currentRow() < len(self.clips))

@@ -34,9 +34,13 @@ def progress_line(n, total, text):
         print(file=sys.stderr, flush=True)
 
 
-def batch(rows, output, fmt='mp4', timeout=600, progress=lambda *args: None, on_failure=lambda row: None):
+def batch(rows, output, fmt='mp4', timeout=600, progress=lambda *args: None, on_failure=lambda row: None, on_item=lambda *args: None):
     results, errors = [], []
     for n, row in enumerate(rows, 1):
+        on_item(row, '正在导出')
+        def stage(value, total, text):
+            on_item(row, f'导出 {value}%' if total == 100 else '正在导出')
+            progress(n-1, len(rows), f'{text} · {n}/{len(rows)}')
         progress(n-1, len(rows), f'正在导出 {n}/{len(rows)} · {row.key}')
         try:
             from . import recovery
@@ -46,17 +50,17 @@ def batch(rows, output, fmt='mp4', timeout=600, progress=lambda *args: None, on_
                 prepare_lazy(row)
             if row.status == 'partial' and getattr(row, 'desktop_source', None):
                 with tempfile.TemporaryDirectory(prefix='cache-lens-recovery-') as work:
-                    clips = recovery.recover(row, work, timeout, lambda a, b, text: progress(n-1, len(rows), text))
-                    paths, failures = recovery.export_merged_clips(row, clips, output, timeout,
-                        lambda a, b, text: progress(n-1, len(rows), text))
+                    clips = recovery.recover(row, work, timeout, stage)
+                    paths, failures = recovery.export_merged_clips(row, clips, output, timeout, stage)
                     if failures: raise RuntimeError(failures[0])
                     if not paths: raise RuntimeError('未找到可导出的片段')
                     results.append(paths[0])
+                on_item(row, '已导出片段')
                 continue
             if recovery.can_export_cached(row):
                 try:
                     results.append(recovery.export_cached(row, output, timeout, fmt,
-                        lambda a, b, text: progress(n-1, len(rows), f'{text} · {n}/{len(rows)}')))
+                        stage))
                 except recovery.CachedMediaInvalid:
                     if fmt != 'mp4':
                         raise
@@ -64,17 +68,20 @@ def batch(rows, output, fmt='mp4', timeout=600, progress=lambda *args: None, on_
                         clips = recovery.recover(row, work, timeout, lambda a, b, text: progress(n-1, len(rows), f'{text} · {n}/{len(rows)}'))
                         if not clips:
                             raise RuntimeError('未找到可导出的片段')
-                        paths, failures = recovery.export_merged_clips(row, clips, output, timeout,
-                            lambda a, b, text: progress(n-1, len(rows), f'{text} · {n}/{len(rows)}'))
+                        paths, failures = recovery.export_merged_clips(row, clips, output, timeout, stage)
                         if failures:
                             raise RuntimeError(failures[0])
                         if not paths:
                             raise RuntimeError('未找到可导出的片段')
                         results.append(paths[0])
+                        on_item(row, '已导出片段')
+                        continue
             else:
-                results.append(core.export(row, output, fmt, timeout))
+                results.append(core.export(row, output, fmt, timeout, lambda value: on_item(row, f'导出 {value}%')))
+            on_item(row, '已导出')
         except (OSError, RuntimeError, ValueError) as e:
             errors.append(f'{row.path.name}: {e}')
+            on_item(row, '导出失败')
             on_failure(row)
     progress(len(rows), len(rows), f'成功 {len(results)} 项 · 失败 {len(errors)} 项')
     return results, errors

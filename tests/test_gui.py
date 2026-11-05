@@ -100,7 +100,7 @@ def test_bulk_skip_exported_and_retry_failed_rows(window, monkeypatch):
     (window.output / f'{row.key}.mp4').touch()
     window.skip_exported_action.setChecked(True)
     calls = []
-    def fake_batch(rows, output, fmt, timeout, progress, on_failure):
+    def fake_batch(rows, output, fmt, timeout, progress, on_failure, on_item):
         calls.append(list(rows))
         if len(calls) == 1:
             on_failure(rows[0])
@@ -572,7 +572,7 @@ def test_partial_preview_arrives_before_analysis_finishes(window, monkeypatch):
         wait_for(lambda: blocked.is_set() and len(window.recovery.clips) == 1)
         assert window.busy and window.progress.isVisible()
         assert window.recovery.watch.isEnabled()
-        assert not window.recovery.save.isEnabled()
+        assert window.recovery.save.isEnabled()
     finally:
         release.set()
     wait_for(lambda: not window.busy)
@@ -671,3 +671,58 @@ def test_switching_back_reuses_completed_fragment_analysis(window):
     assert not window.busy
     assert [clip.path for clip in window.recovery.clips] == paths
     assert all(path.exists() for path in paths)
+
+
+def test_export_found_clips_while_analysis_continues(window, tmp_path, monkeypatch):
+    import threading
+    from test_recovery import broken_movie
+    from tg_cache_lens import recovery
+    row = broken_movie(window.cache)
+    clips = recovery.recover(row, tmp_path)
+    release = threading.Event()
+    def slow_recover(row, directory, timeout, progress, on_clip):
+        on_clip(clips[0])
+        while not release.wait(.02): progress(0, 0, '分析片段')
+        return clips[:1]
+    started = threading.Event()
+    def export(*args):
+        started.set()
+        return [], []
+    monkeypatch.setattr(recovery, 'recover', slow_recover)
+    monkeypatch.setattr(recovery, 'export_merged_clips', export)
+    window.scanned([row]); window.media_filter.setCurrentIndex(2)
+    try:
+        click_row(window)
+        wait_for(lambda: window.busy and len(window.recovery.clips) == 1)
+        assert window.recovery.save.isEnabled()
+        click(window.recovery.save)
+        wait_for(started.is_set)
+        assert window.busy
+    finally:
+        release.set()
+        wait_for(lambda: not any(job.isRunning() for job in window.jobs))
+
+
+def test_export_status_remains_on_each_row_when_selection_changes(window, monkeypatch):
+    import threading
+    from dataclasses import replace
+    row = next(r for r in core.scan(window.cache) if r.status == 'covered')
+    other = replace(row, path=row.path.with_name('second'))
+    window.scanned([row, other])
+    started, release = threading.Event(), threading.Event()
+    def fake_batch(rows, output, fmt, timeout, progress, on_failure, on_item):
+        on_item(row, '导出 42%'); started.set()
+        release.wait(10)
+        on_item(row, '导出失败'); on_failure(row)
+        return [], ['synthetic error']
+    monkeypatch.setattr('tg_cache_lens.gui.batch', fake_batch)
+    try:
+        window.export_rows([row])
+        wait_for(lambda: started.is_set() and window.widgets[str(row.path)].exported_badge.text() == '导出 42%')
+        click_row(window, 1)
+        assert window.widgets[str(row.path)].exported_badge.text() == '导出 42%'
+    finally:
+        release.set()
+        wait_for(lambda: not window.busy)
+    assert window.widgets[str(row.path)].exported_badge.text() == '导出失败'
+    assert window.errors_button.isVisible()

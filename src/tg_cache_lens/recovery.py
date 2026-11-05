@@ -236,7 +236,7 @@ def export_cached(row, output, timeout=600, fmt='mp4', progress=lambda *args: No
                                '-map', '0:V:0', '-map', '0:a?', '-c', 'copy', '-map_metadata', '-1']
                     command += (['-movflags', '+faststart'] if fmt == 'mp4' else []) + [str(candidate)]
                 try:
-                    core.run(command, timeout)
+                    core.run(command, timeout, lambda percent: progress(percent, 100, '导出 · 生成视频'), row.duration)
                 except RuntimeError as exc:
                     raise CachedMediaInvalid('缓存视频无法直接导出') from exc
             progress(0, 0, '导出 · 验证视频')
@@ -481,7 +481,8 @@ def export_merged_clips(row, clips, output, timeout, progress=lambda *args: None
                 if audio: command += ['-map', '[a]']
                 command += ['-c:v', 'libx264', '-preset', 'veryfast', '-threads', str(min(8, os.cpu_count() or 2))]
                 if audio: command += ['-c:a', 'aac']
-                core.run(command + ['-movflags', '+faststart', str(merged)], timeout)
+                core.run(command + ['-movflags', '+faststart', str(merged)], timeout,
+                         lambda percent: progress(percent, 100, '导出 · 合并片段'), sum(c.length for c in clips))
 
             checked = None
             if not (any(has_audio) and not all(has_audio)):
@@ -489,7 +490,7 @@ def export_merged_clips(row, clips, output, timeout, progress=lambda *args: None
                            '-i', str(manifest), '-map', '0:v:0', '-map', '0:a?', '-c', 'copy',
                            '-movflags', '+faststart', str(merged)]
                 try:
-                    core.run(command, timeout)
+                    core.run(command, timeout, lambda percent: progress(percent, 100, '导出 · 合并片段'), sum(c.length for c in clips))
                     progress(0, 0, '导出 · 验证视频')
                     checked = core.inspect(merged, deep=True, timeout=timeout)
                 except RuntimeError:
