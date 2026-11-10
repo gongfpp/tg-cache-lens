@@ -743,9 +743,9 @@ def test_failed_clip_export_can_retry_after_switching_video(window, tmp_path, mo
     window.scanned([row, other]); window.media_filter.setCurrentIndex(2)
     window.current = row
     window.save_clips(clips)
-    wait_for(lambda: not window.busy and bool(window.failed_export_clips))
+    wait_for(lambda: not window.busy and bool(window.failed_clip_exports))
     window.select(window.list.item(1))
-    assert window.failed_export_clips and all(c.path.exists() for c in clips)
+    assert window.failed_clip_exports and all(c.path.exists() for c in clips)
     window.retry_failed()
     wait_for(lambda: not window.busy and len(calls) == 2)
     assert calls == [row, row]
@@ -762,3 +762,70 @@ def test_snapshot_retirement_waits_for_parallel_export(window, tmp_path):
     window.parallel_export_job = None
     window.retire_desktop_snapshots()
     assert not path.exists()
+
+
+def test_multiple_failed_clip_exports_retry_independently(window, tmp_path, monkeypatch):
+    from test_recovery import broken_movie
+    from tg_cache_lens import recovery
+    first = broken_movie(window.cache/'first')
+    second = broken_movie(window.cache/'second')
+    clips1 = recovery.recover(first, tmp_path)
+    clips2 = recovery.recover(second, tmp_path)
+    calls = []
+    def fake_export(row, clips, output, timeout, progress):
+        calls.append(row)
+        return ([], ['failure']) if len(calls) <= 2 else ([output/'done.mp4'], [])
+    monkeypatch.setattr(recovery, 'export_merged_clips', fake_export)
+    window.scanned([first, second]); window.media_filter.setCurrentIndex(2)
+    window.current = first; window.save_clips(clips1)
+    wait_for(lambda: not window.busy and len(window.failed_clip_exports) == 1)
+    window.current = second; window.save_clips(clips2)
+    wait_for(lambda: not window.busy and len(window.failed_clip_exports) == 2)
+    assert all(c.path.exists() for c in clips1 + clips2)
+    assert window.widgets[str(first.path)].exported_badge.toolTip() == 'failure'
+    assert window.widgets[str(second.path)].exported_badge.toolTip() == 'failure'
+    window.current = first; window.retry_failed()
+    wait_for(lambda: not window.busy and len(calls) == 3)
+    assert calls == [first, second, first]
+    assert any(failure[0] is second for failure in window.failed_clip_exports.values())
+    assert not any(failure[0] is first for failure in window.failed_clip_exports.values())
+
+
+def test_multiple_failed_video_batches_retry_selected_only(window, tmp_path, monkeypatch):
+    from dataclasses import replace
+    first = next(r for r in core.scan(window.cache) if r.status == 'covered')
+    second = replace(first, path=first.path.with_name('other'))
+    calls = []
+    def batch(rows, output, fmt, timeout, progress, on_failure, on_item):
+        calls.append(list(rows))
+        if len(calls) <= 2:
+            on_item(rows[0], '导出失败'); on_failure(rows[0]); return [], ['synthetic failure']
+        on_item(rows[0], '已导出'); return [tmp_path/'output.mp4'], []
+    monkeypatch.setattr('tg_cache_lens.gui.batch', batch)
+    window.scanned([first, second])
+    window.export_rows([first]); wait_for(lambda: not window.busy and len(window.failed_export_rows) == 1)
+    window.export_rows([second]); wait_for(lambda: not window.busy and len(window.failed_export_rows) == 2)
+    window.current = first
+    window.retry_failed(); wait_for(lambda: not window.busy and len(calls) == 3)
+    assert calls[-1] == [first]
+    assert window.failed_export_rows == [second]
+
+
+def test_multiple_failed_jobs_hold_only_their_own_snapshots(window, tmp_path):
+    import tempfile
+    from tg_cache_lens.recovery import Clip
+    owners = [tempfile.TemporaryDirectory(dir=tmp_path) for _ in range(2)]
+    rows = [core.Media(Path(owner.name)/'video', 'mp4', 1) for owner in owners]
+    clips = [Clip(tmp_path/f'clip-{n}.mp4', 0, 1) for n in range(2)]
+    for clip in clips: clip.path.touch()
+    for n in range(2):
+        window.failed_clip_exports[(str(n),)] = (rows[n], (clips[n],), tmp_path, ('failure',))
+    window.retired_desktop.extend(owners)
+    window.retire_desktop_snapshots()
+    assert all(Path(owner.name).exists() for owner in owners)
+    window.failed_clip_exports.pop(('0',))
+    window.retire_desktop_snapshots()
+    assert not Path(owners[0].name).exists() and Path(owners[1].name).exists()
+    window.failed_clip_exports.clear()
+    window.retire_desktop_snapshots()
+    assert not Path(owners[1].name).exists()

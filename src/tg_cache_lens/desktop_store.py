@@ -4,6 +4,7 @@ import re
 import struct
 from dataclasses import dataclass
 from hashlib import sha256
+from concurrent.futures import ThreadPoolExecutor
 
 import xxhash
 
@@ -164,6 +165,34 @@ def read_document(database, base_key, key, snapshot=None, spool=None, identity_o
             return None
     paths = [directory / entry.relative_path() for entry in group.values()]
     stamps = [optional_stamp(path) for path in paths]
+    if identity_only:
+        def check_slice(item):
+            number, entry = item
+            event = core.current_cancel_event()
+            if event is not None and event.is_set(): raise core.WorkCancelled()
+            state = optional_stamp(directory / entry.relative_path())
+            if state is None:
+                return b'missing', b''
+            try:
+                value = read_value(directory, entry, key)
+            except (FileNotFoundError, CacheChanged) as exc:
+                raise CacheChanged('Desktop 缓存条目正在变化，请重试') from exc
+            except (OSError, ValueError):
+                return b'invalid', repr(state).encode('ascii')
+            return b'valid', sha256(value).digest()
+        items = sorted(group.items())
+        identity = sha256()
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = pool.map(core.propagate_cancel(check_slice), items)
+            for (number, entry), (state, digest) in zip(items, results):
+                identity.update(struct.pack('<IQQIBI', number, *entry.key, entry.size, entry.tag, entry.checksum))
+                identity.update(entry.place)
+                identity.update(state)
+                identity.update(digest)
+        snapshot.check()
+        if [optional_stamp(path) for path in paths] != stamps:
+            raise CacheChanged('视频缓存索引已变化，请重新扫描')
+        return [], [], (), (), identity.digest()
     parts, ambiguous, unavailable = [], [], []
     def add_parts(number, decoded):
         for part in decoded:
@@ -197,8 +226,6 @@ def read_document(database, base_key, key, snapshot=None, spool=None, identity_o
             continue
         identity.update(b'valid')
         identity.update(sha256(value).digest())
-        if identity_only:
-            continue
         try:
             add_parts(number, decode_slice(value, number))
         except AmbiguousSlice:
@@ -218,11 +245,6 @@ def read_document(database, base_key, key, snapshot=None, spool=None, identity_o
                 except ValueError:
                     pass
             unavailable.append(number)
-    if identity_only:
-        snapshot.check()
-        if [optional_stamp(path) for path in paths] != stamps:
-            raise CacheChanged('视频缓存索引已变化，请重新扫描')
-        return [], [], (), (), identity.digest()
     # Exclude conflicting overlap from every source, while retaining ranges
     # outside it. The cache alone cannot establish which copy is correct.
     parts.sort(key=lambda item: item[1].offset)

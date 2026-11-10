@@ -40,6 +40,11 @@ def status_label(row):
     return '可导出' if exportable(row) else core.LABELS[row.status]
 
 
+def media_identity(row):
+    source = getattr(row, 'desktop_source', None)
+    return (str(source.database), row.key) if source else (str(row.path), row.key)
+
+
 def cached_label(row):
     return size(row.cached_size) if row.cached_size is not None else '缓存大小未知'
 
@@ -324,9 +329,8 @@ class Window(QMainWindow):
         self.pending_lazy_preview = None
         self.current = None; self.preview_path = None; self.pending_preview = None; self.last_results = None
         self.failed_export_rows = []
-        self.failed_export_clips = ()
-        self.failed_clip_row = None
-        self.failed_clip_output = None
+        self.failed_row_reasons = {}
+        self.failed_clip_exports = OrderedDict()
         self.temp = tempfile.TemporaryDirectory(prefix='cache-lens-gui-')
         self.analysis_cache = OrderedDict()
         self.scan_cache = {}
@@ -700,11 +704,7 @@ class Window(QMainWindow):
         self.export_states[str(row.path)] = '正在导出'
         self.refresh_exported()
         held = tuple(clips)
-        self.failed_export_clips = ()
-        self.failed_clip_row = None
-        self.failed_clip_output = None
-        self.failed_export_rows = []
-        self.retry_button.hide()
+        failure_key = (media_identity(row), tuple(clip.path for clip in held), str(output))
         self.errors_button.hide()
         self.export_held_paths = {clip.path for clip in held}
         if not parallel: self.recovery.setEnabled(False)
@@ -713,21 +713,26 @@ class Window(QMainWindow):
             self.export_item_state(row, '导出失败' if result[1] else '已导出片段')
             self.exported(result)
             if result[1] and all(clip.path.exists() for clip in held):
-                self.failed_export_clips = held
-                self.failed_clip_row, self.failed_clip_output = row, output
-                self.retry_button.show()
-        def failed():
+                self.failed_clip_exports[failure_key] = (row, held, output, tuple(result[1]))
+                self.refresh_exported()
+            elif not result[1]:
+                old = self.failed_clip_exports.pop(failure_key, None)
+                if old:
+                    for clip in old[1]: self.remove_temporary(clip.path)
+                    self.refresh_exported()
+            self.retry_button.setVisible(bool(self.failed_clip_exports) or bool(self.failed_export_rows))
+        def failed(message='导出失败'):
             self.export_item_state(row, '导出失败')
             if all(clip.path.exists() for clip in held):
-                self.failed_export_clips = held
-                self.failed_clip_row, self.failed_clip_output = row, output
+                self.failed_clip_exports[failure_key] = (row, held, output, (message,))
+                self.refresh_exported()
                 self.retry_button.show()
         operation = lambda progress: recovery.export_merged_clips(row, held, output, self.timeout, progress)
         if parallel:
             job = Job(operation, self); self.parallel_export_job = job; self.jobs.append(job)
             job.progress.connect(lambda n, total, text: self.export_item_state(row, f"{text.replace('导出 · ', '')} {n}%" if total == 100 else text.replace('导出 · ', '')))
             job.result.connect(finished)
-            job.failed.connect(lambda message: (failed(), self.show_error(message)))
+            job.failed.connect(lambda message: (failed(message), self.show_error(message)))
             def finish_parallel():
                 self.parallel_export_job = None
                 self.export_hold_row = None
@@ -798,7 +803,7 @@ class Window(QMainWindow):
         self.preview_path = None
 
     def remove_temporary(self, path):
-        if any(clip.path == path for clip in self.failed_export_clips):
+        if any(clip.path == path for _, clips, _, _ in self.failed_clip_exports.values() for clip in clips):
             return
         if path in self.export_held_paths:
             self.deferred_removals.add(path)
@@ -813,10 +818,11 @@ class Window(QMainWindow):
         self.retirement_pending = False
         if self.closing:
             return  # closeEvent cleans the enclosing temporary directory.
+        failed_rows = self.failed_export_rows + [row for row, _, _, _ in self.failed_clip_exports.values()]
         if not self.parallel_export_job and not self.export_hold_job and not any(isinstance(job, Thumbnails) and job.isRunning() for job in self.jobs):
             remaining = []
             for owner in self.retired_desktop:
-                if self.failed_export_clips and self.failed_clip_row and self.failed_clip_row.path.is_relative_to(Path(owner.name)):
+                if any(row.path.is_relative_to(Path(owner.name)) for row in failed_rows):
                     remaining.append(owner)
                     continue
                 try:
@@ -824,7 +830,7 @@ class Window(QMainWindow):
                 except PermissionError:
                     remaining.append(owner)
             self.retired_desktop = remaining
-        held_only = self.failed_export_clips and all(self.failed_clip_row.path.is_relative_to(Path(owner.name)) for owner in self.retired_desktop)
+        held_only = failed_rows and all(any(row.path.is_relative_to(Path(owner.name)) for row in failed_rows) for owner in self.retired_desktop)
         if self.retired_desktop and not held_only and not self.retirement_pending:
             self.retirement_pending = True
             QTimer.singleShot(100, self.retire_desktop_snapshots)
@@ -858,8 +864,11 @@ class Window(QMainWindow):
     def refresh_exported(self):
         states = exported_states(self.rows, self.output)
         for path, widget in self.widgets.items():
-            label = self.export_states.get(path, states.get(path, ''))
+            failures = [failure for key, failure in self.failed_clip_exports.items() if key[0] == media_identity(widget.media)]
+            row_reason = self.failed_row_reasons.get(media_identity(widget.media))
+            label = self.export_states.get(path, '导出失败' if failures or row_reason else states.get(path, ''))
             widget.exported_badge.setText(label)
+            widget.exported_badge.setToolTip('\n'.join(([row_reason] if row_reason else []) + [error for failure in failures for error in failure[3]]))
             widget.exported_badge.setVisible(bool(label))
 
     def choose_output(self):
@@ -1137,6 +1146,7 @@ class Window(QMainWindow):
         if self.stopping_analysis: self.status.setText('分析已停止')
         self.analysis_job = False
         self.busy = False; self.active_job = None; self.progress.hide(); self.update_actions()
+        if self.retired_desktop and not self.retirement_pending: self.retire_desktop_snapshots()
         self.recovery.refresh()
         for widget in self.widgets.values(): widget.refresh_state()
         if self.current:
@@ -1206,8 +1216,7 @@ class Window(QMainWindow):
         for clips in self.analysis_cache.values():
             for clip in clips: self.remove_temporary(clip.path)
         self.analysis_cache.clear()
-        self.failed_export_rows = []
-        if not self.failed_export_clips:
+        if not self.failed_clip_exports and not self.failed_export_rows:
             self.retry_button.hide()
             self.errors_button.hide()
         previous = self.desktop_owner
@@ -1358,15 +1367,27 @@ class Window(QMainWindow):
         fmt = ('mp4', 'mkv', 'original')[self.format.currentIndex()]
         output = self.output
         failed = []
-        self.failed_export_clips = ()
-        self.retry_button.hide()
+        self.retry_button.setVisible(bool(self.failed_clip_exports))
         self.status.setText('正在导出…')
         for row in rows: self.export_states[str(row.path)] = '等待导出'
         self.refresh_exported()
         def finished(result):
-            self.failed_export_rows = failed
+            failed_ids = {media_identity(row) for row in failed}
+            if len(result[0]) == len(rows) - len(failed):
+                successful = {media_identity(row) for row in rows} - failed_ids
+                self.failed_export_rows = [row for row in self.failed_export_rows if media_identity(row) not in successful]
+                for identity in successful: self.failed_row_reasons.pop(identity, None)
+            known = {media_identity(row) for row in self.failed_export_rows}
+            for row, reason in zip(failed, result[1]):
+                identity = media_identity(row)
+                if identity not in known:
+                    self.failed_export_rows.append(row)
+                    known.add(identity)
+                else:
+                    self.failed_export_rows = [row if media_identity(item) == identity else item for item in self.failed_export_rows]
+                self.failed_row_reasons[identity] = reason
             self.exported(result)
-            self.retry_button.setVisible(bool(failed))
+            self.retry_button.setVisible(bool(self.failed_export_rows) or bool(self.failed_clip_exports))
         def operation(progress):
             job = QThread.currentThread()
             return batch(rows, output, fmt, self.timeout, progress, failed.append, job.item_state.emit)
@@ -1375,6 +1396,10 @@ class Window(QMainWindow):
     def export_item_state(self, row, state):
         if state in ('已导出', '已导出片段'):
             self.export_states.pop(str(row.path), None)
+            if state == '已导出':
+                identity = media_identity(row)
+                self.failed_export_rows = [item for item in self.failed_export_rows if media_identity(item) != identity]
+                self.failed_row_reasons.pop(identity, None)
             self.refresh_exported()
         else:
             self.export_states[str(row.path)] = state
@@ -1385,10 +1410,17 @@ class Window(QMainWindow):
 
     def retry_failed(self):
         if self.busy: return
-        if self.failed_export_clips:
-            self.save_clips(self.failed_export_clips, self.failed_clip_row, self.failed_clip_output)
+        selected_rows = [row for row in self.failed_export_rows if self.current and media_identity(row) == media_identity(self.current)]
+        selected_clips = [key for key in self.failed_clip_exports if self.current and key[0] == media_identity(self.current)]
+        if selected_rows and not selected_clips:
+            self.export_rows(selected_rows)
+            return
+        if self.failed_clip_exports:
+            key = selected_clips[0] if selected_clips else next(iter(self.failed_clip_exports))
+            row, clips, output, _ = self.failed_clip_exports[key]
+            self.save_clips(clips, row, output)
         elif self.failed_export_rows:
-            self.export_rows(self.failed_export_rows)
+            self.export_rows(selected_rows or list(self.failed_export_rows))
 
     def exported(self, result):
         self.last_results = result
