@@ -694,7 +694,7 @@ wheels = [
 
 [[package]]
 name = "tg-cache-lens"
-version = "0.5.8"
+version = "0.5.9"
 source = { editable = "." }
 dependencies = [
     { name = "cryptography" },

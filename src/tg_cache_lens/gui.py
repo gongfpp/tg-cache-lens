@@ -647,7 +647,7 @@ class Window(QMainWindow):
                       on_clip=QThread.currentThread().clip_ready.emit),
                       lambda clips: self.recovery_ready(request, row, clips), analysis=True,
                       on_clip=lambda clip: self.recovery_clip(request, row, clip),
-                      on_failure=lambda: self.recovery_failed(request, row))
+                      on_failure=lambda message: self.recovery_failed(request, row))
             self.preview_analysis_job = self.active_job
         elif row.status in ELIGIBLE:
             self.toggle_play()
@@ -726,6 +726,8 @@ class Window(QMainWindow):
             self.retry_button.setVisible(bool(self.failed_clip_exports) or bool(self.failed_export_rows))
         def failed(message='导出失败'):
             self.export_item_state(row, '导出失败')
+            self.last_results = ([], [f'{row.key}: {message}'])
+            self.errors_button.show()
             if all(clip.path.exists() for clip in held):
                 self.failed_clip_exports[failure_key] = (row, held, output, (message,))
                 self.refresh_exported()
@@ -1126,7 +1128,7 @@ class Window(QMainWindow):
         job.streaming = on_clip is not None
         if on_clip is not None: job.clip_ready.connect(on_clip)
         if on_row is not None: job.row_ready.connect(on_row)
-        if on_failure is not None: job.failed.connect(lambda message: on_failure())
+        if on_failure is not None: job.failed.connect(on_failure)
         job.progress.connect(self.on_progress)
         job.result.connect(done); job.failed.connect(self.show_error)
         job.finished.connect(self.task_finished); job.start()
@@ -1415,6 +1417,9 @@ class Window(QMainWindow):
         if self.busy: return
         selected_rows = [row for row in self.failed_export_rows if self.current and media_identity(row) == media_identity(self.current)]
         selected_clips = [key for key in self.failed_clip_exports if self.current and key[0] == media_identity(self.current)]
+        if self.current and not selected_rows and not selected_clips:
+            self.status.setText('当前视频没有失败项，请选择需要重试的视频')
+            return
         if selected_rows and not selected_clips:
             self.export_rows(selected_rows)
             return

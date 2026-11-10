@@ -746,6 +746,7 @@ def test_failed_clip_export_can_retry_after_switching_video(window, tmp_path, mo
     wait_for(lambda: not window.busy and bool(window.failed_clip_exports))
     window.select(window.list.item(1))
     assert window.failed_clip_exports and all(c.path.exists() for c in clips)
+    window.current = row
     window.retry_failed()
     wait_for(lambda: not window.busy and len(calls) == 2)
     assert calls == [row, row]
@@ -876,3 +877,32 @@ def test_clip_retry_after_invalid_output_produces_playable_video(window, tmp_pat
     paths = list(output.glob('*.mp4'))
     assert len(paths) == 1 and core.inspect(paths[0], deep=True).duration > 0
     assert all(clip.path.exists() for clip in window.recovery.clips)
+
+
+def test_clip_exception_retains_specific_reason_and_details_button(window, tmp_path):
+    from tg_cache_lens import recovery
+    row = core.Media(tmp_path/'sample', 'mp4', 1, status='partial')
+    clip_path = tmp_path/'clip'; clip_path.write_bytes(b'synthetic')
+    invalid = tmp_path/'not-a-directory'; invalid.write_text('synthetic')
+    window.current = row; window.output = invalid
+    window.save_clips([recovery.Clip(clip_path, 0, 1)])
+    wait_for(lambda: not window.busy and bool(window.failed_clip_exports))
+    reason = next(iter(window.failed_clip_exports.values()))[3][0]
+    assert reason != '导出失败' and window.errors_button.isVisible()
+    assert reason in window.last_results[1][0]
+
+
+def test_retry_does_not_export_a_different_selected_video(window, tmp_path, monkeypatch):
+    from tg_cache_lens import recovery
+    first = core.Media(tmp_path/'first', 'mp4', 1, status='partial')
+    other = core.Media(tmp_path/'other', 'mp4', 1, status='partial')
+    clip_path = tmp_path/'clip'; clip_path.write_bytes(b'synthetic')
+    calls = []
+    def fake(row, clips, output, timeout, progress):
+        calls.append(row); return [], ['synthetic failure']
+    monkeypatch.setattr(recovery, 'export_merged_clips', fake)
+    window.current = first; window.save_clips([recovery.Clip(clip_path, 0, 1)])
+    wait_for(lambda: not window.busy and bool(window.failed_clip_exports))
+    window.current = other; window.retry_failed()
+    assert calls == [first] and not window.busy
+    assert '当前视频没有失败项' in window.status.text()

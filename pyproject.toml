@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "tg-cache-lens"
-version = "0.5.8"
+version = "0.5.9"
 description = "Inspect, preview and export supported Telegram video caches on macOS and Windows."
 requires-python = ">=3.10"
 license = "MIT"
