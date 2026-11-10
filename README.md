@@ -23,7 +23,7 @@ Cache Lens 是一个开源桌面工具，支持 Windows 上的官方 Telegram De
 
 ## Windows 快速开始
 
-1. 从 [Releases](https://github.com/gongfpp/tg-cache-lens/releases) 下载 `tg-cache-lens-0.5.9-windows-x64.zip`，解压整个文件夹，双击 `Cache Lens.exe`。
+1. 从 [Releases](https://github.com/gongfpp/tg-cache-lens/releases) 下载 `tg-cache-lens-0.5.10-windows-x64.zip`，解压整个文件夹，双击 `Cache Lens.exe`。
 2. 安装 [FFmpeg](https://ffmpeg.org/download.html)，确保 `ffmpeg` 和 `ffprobe` 可以从 PATH 运行；程序也会查找当前用户的 WinGet Links 目录。
 3. 点击“选择目录”，选择 Telegram Desktop portable 程序目录或 `tdata`，选择后开始扫描。“筛选”菜单中也可使用自动扫描；多个候选目录时请手动选择。
 4. 选择导出目录，点击视频预览或勾选后导出。缺片视频可分析片段，再选择片段合并导出。

@@ -705,7 +705,6 @@ class Window(QMainWindow):
         self.refresh_exported()
         held = tuple(clips)
         failure_key = retry_key or (media_identity(row), tuple(clip.path for clip in held), str(output))
-        self.errors_button.hide()
         self.export_held_paths = {clip.path for clip in held}
         if not parallel: self.recovery.setEnabled(False)
         self.export_hold_row = row
@@ -724,6 +723,7 @@ class Window(QMainWindow):
                         if clip.path not in retained: self.remove_temporary(clip.path)
                     self.refresh_exported()
             self.retry_button.setVisible(bool(self.failed_clip_exports) or bool(self.failed_export_rows))
+            self.update_failure_button()
         def failed(message='导出失败'):
             self.export_item_state(row, '导出失败')
             self.last_results = ([], [f'{row.key}: {message}'])
@@ -1435,11 +1435,21 @@ class Window(QMainWindow):
         paths, errors = result
         self.refresh_exported()
         self.status.setText(f'成功导出 {len(paths)} 项 · 失败 {len(errors)} 项')
-        self.errors_button.setVisible(bool(errors))
+        self.update_failure_button()
+
+    def update_failure_button(self):
+        errors = self.last_results[1] if self.last_results else []
+        self.errors_button.setVisible(bool(errors or self.failed_row_reasons or self.failed_clip_exports))
 
     def show_failures(self):
+        reasons = list(self.failed_row_reasons.values())
+        reasons.extend(f'{row.key}: {error}' for row, _, _, errors in self.failed_clip_exports.values() for error in errors)
         if self.last_results:
-            QMessageBox.warning(self, '失败原因', '\n\n'.join(self.last_results[1]))
+            reasons.extend(error for error in self.last_results[1]
+                           if not any(reason == error or reason.endswith(': ' + error) for reason in reasons))
+        reasons = list(dict.fromkeys(reasons))
+        if reasons:
+            QMessageBox.warning(self, '失败原因', '\n\n'.join(reasons))
 
     def closeEvent(self, event):
         running = [job for job in self.jobs if job.isRunning()]

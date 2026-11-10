@@ -906,3 +906,47 @@ def test_retry_does_not_export_a_different_selected_video(window, tmp_path, monk
     window.current = other; window.retry_failed()
     assert calls == [first] and not window.busy
     assert '当前视频没有失败项' in window.status.text()
+
+
+def test_failure_details_include_remaining_jobs_after_successful_retry(window, tmp_path, monkeypatch):
+    from test_recovery import broken_movie
+    from tg_cache_lens import recovery
+    from PySide6.QtWidgets import QMessageBox
+    first = broken_movie(window.cache/'first'); second = broken_movie(window.cache/'second')
+    clips1 = recovery.recover(first, tmp_path); clips2 = recovery.recover(second, tmp_path)
+    calls = []
+    def fake_export(row, clips, output, timeout, progress):
+        calls.append(row)
+        return ([], [f'failure-{len(calls)}']) if len(calls) <= 2 else ([output/'done.mp4'], [])
+    monkeypatch.setattr(recovery, 'export_merged_clips', fake_export)
+    messages = []
+    monkeypatch.setattr(QMessageBox, 'warning', lambda parent, title, message: messages.append(message))
+    window.scanned([first, second]); window.media_filter.setCurrentIndex(2)
+    window.current = first; window.save_clips(clips1)
+    wait_for(lambda: not window.busy and len(window.failed_clip_exports) == 1)
+    window.current = second; window.save_clips(clips2)
+    wait_for(lambda: not window.busy and len(window.failed_clip_exports) == 2)
+    window.current = first; window.retry_failed()
+    wait_for(lambda: not window.busy and len(window.failed_clip_exports) == 1)
+    assert window.errors_button.isVisible()
+    window.show_failures()
+    assert 'failure-2' in messages[-1] and 'failure-1' not in messages[-1]
+    window.current = second; window.retry_failed()
+    wait_for(lambda: not window.busy and not window.failed_clip_exports)
+    assert not window.errors_button.isVisible()
+
+
+def test_failure_details_include_video_and_clip_failures(window, tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+    from tg_cache_lens import recovery
+    row = next(r for r in core.scan(window.cache) if r.status == 'covered')
+    clip_path = tmp_path/'clip'; clip_path.write_bytes(b'synthetic')
+    clip = recovery.Clip(clip_path, 0, 1)
+    window.failed_row_reasons[('video', 'a')] = 'video failure'
+    window.failed_clip_exports[('clip',)] = (row, (clip,), tmp_path, ('clip failure',))
+    window.exported(([tmp_path/'done.mp4'], []))
+    messages = []
+    monkeypatch.setattr(QMessageBox, 'warning', lambda parent, title, message: messages.append(message))
+    assert window.errors_button.isVisible()
+    window.show_failures()
+    assert 'video failure' in messages[-1] and 'clip failure' in messages[-1]
