@@ -829,3 +829,50 @@ def test_multiple_failed_jobs_hold_only_their_own_snapshots(window, tmp_path):
     window.failed_clip_exports.clear()
     window.retire_desktop_snapshots()
     assert not Path(owners[1].name).exists()
+
+
+def test_clip_retry_uses_current_output_and_keeps_visible_and_cached_clips(window, tmp_path, monkeypatch):
+    from test_recovery import broken_movie
+    from tg_cache_lens import recovery
+    row = broken_movie(window.cache/'one')
+    clips = recovery.recover(row, tmp_path)
+    first, second = tmp_path/'first', tmp_path/'second'
+    first.mkdir(); second.mkdir()
+    calls = []
+    def fake_export(item, held, output, timeout, progress):
+        calls.append(output)
+        return ([], ['failure']) if len(calls) == 1 else ([output/'done.mp4'], [])
+    monkeypatch.setattr(recovery, 'export_merged_clips', fake_export)
+    window.scanned([row]); window.current = row; window.output = first
+    window.recovery.populate(clips)
+    window.analysis_cache[(str(row.path), row.fingerprint)] = tuple(clips)
+    window.save_clips(clips)
+    wait_for(lambda: not window.busy and bool(window.failed_clip_exports))
+    window.output = second
+    window.retry_failed()
+    wait_for(lambda: not window.busy and len(calls) == 2)
+    assert calls == [first, second]
+    assert not window.failed_clip_exports
+    assert all(clip.path.exists() for clip in window.recovery.clips)
+    assert all(clip.path.exists() for clip in window.analysis_cache[(str(row.path), row.fingerprint)])
+    window.dismiss()
+    assert all(clip.path.exists() for clip in clips)
+
+
+def test_clip_retry_after_invalid_output_produces_playable_video(window, tmp_path):
+    from test_recovery import broken_movie
+    from tg_cache_lens import recovery
+    row = broken_movie(window.cache/'source')
+    clips = recovery.recover(row, tmp_path)
+    invalid = tmp_path/'not-a-directory'; invalid.write_text('synthetic')
+    output = tmp_path/'valid-output'
+    window.scanned([row]); window.current = row; window.output = invalid
+    window.recovery.populate(clips)
+    window.save_clips(clips)
+    wait_for(lambda: not window.busy and bool(window.failed_clip_exports))
+    window.output = output
+    window.retry_failed()
+    wait_for(lambda: not window.busy and not window.failed_clip_exports)
+    paths = list(output.glob('*.mp4'))
+    assert len(paths) == 1 and core.inspect(paths[0], deep=True).duration > 0
+    assert all(clip.path.exists() for clip in window.recovery.clips)

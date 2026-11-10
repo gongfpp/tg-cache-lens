@@ -696,7 +696,7 @@ class Window(QMainWindow):
             for clip in self.recovery.clips: self.remove_temporary(clip.path)
             self.recovery.populate([])
 
-    def save_clips(self, clips, row=None, output=None):
+    def save_clips(self, clips, row=None, output=None, retry_key=None):
         parallel = self.busy and self.preview_analysis_job is self.active_job
         if (self.busy and not parallel) or self.parallel_export_job or not clips: return
         self.close_clip()
@@ -704,7 +704,7 @@ class Window(QMainWindow):
         self.export_states[str(row.path)] = '正在导出'
         self.refresh_exported()
         held = tuple(clips)
-        failure_key = (media_identity(row), tuple(clip.path for clip in held), str(output))
+        failure_key = retry_key or (media_identity(row), tuple(clip.path for clip in held), str(output))
         self.errors_button.hide()
         self.export_held_paths = {clip.path for clip in held}
         if not parallel: self.recovery.setEnabled(False)
@@ -718,7 +718,10 @@ class Window(QMainWindow):
             elif not result[1]:
                 old = self.failed_clip_exports.pop(failure_key, None)
                 if old:
-                    for clip in old[1]: self.remove_temporary(clip.path)
+                    retained = {clip.path for clip in self.recovery.clips}
+                    retained.update(clip.path for group in self.analysis_cache.values() for clip in group)
+                    for clip in old[1]:
+                        if clip.path not in retained: self.remove_temporary(clip.path)
                     self.refresh_exported()
             self.retry_button.setVisible(bool(self.failed_clip_exports) or bool(self.failed_export_rows))
         def failed(message='导出失败'):
@@ -1418,7 +1421,7 @@ class Window(QMainWindow):
         if self.failed_clip_exports:
             key = selected_clips[0] if selected_clips else next(iter(self.failed_clip_exports))
             row, clips, output, _ = self.failed_clip_exports[key]
-            self.save_clips(clips, row, output)
+            self.save_clips(clips, row, self.output, retry_key=key)
         elif self.failed_export_rows:
             self.export_rows(selected_rows or list(self.failed_export_rows))
 
